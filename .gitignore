@@ -1,5 +1,52 @@
+# Secrets and local configuration
 .env
-venv
-__pycache__
-data
+.env.*
+!.env.example
+*.local
+
+# Python environments, caches, and generated files
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.coverage
+.coverage.*
+htmlcov/
+*.egg-info/
+
+# Local runtime data and databases
+/data/
+*.db
+*.sqlite
+*.sqlite3
+*.log
+
+# Frontend dependencies and build output
+node_modules/
+.next/
+out/
+dist/
+coverage/
+
+# IDE and OS files
+.idea/
+.vscode/
+.DS_Store
+*.swp
+*.swo
+
+# Local tooling and generated reports
+/.kilo/
+repomix-output.xml
 .python-version
+
+# Keep rebuild source surfaces trackable; legacy frontend/assets are excluded
+!kriyaman/
+!kriyaman/docs/
+!kriyaman/tests/
+!kriyaman/persistence/migrations/
