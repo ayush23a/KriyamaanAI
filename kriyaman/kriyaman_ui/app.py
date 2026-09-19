@@ -13,7 +13,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# API Base URL (defaults to environment variable or local backend)
+# API base URL (defaults to an environment variable or the local API server)
 API_BASE_URL = os.getenv("KRIYAMAN_API_URL", "http://localhost:8000/api/v1")
 
 
