@@ -16,7 +16,11 @@ Rules:
 3. For every substantive statement, cite the corresponding evidence ID in your citation_ids list (e.g. ['ev_1']).
 4. If conflicting information is noted in the instructions, present both perspectives neutrally with their citations.
 5. Provide a structured response with answer_text, citation_ids, confidence (0.0 to 1.0), and needs_follow_up (boolean).
-6. Do NOT output private reasoning, chain-of-thought, or internal justifications."""
+6. If the user asks a follow-up about what is missing, why a prior answer was insufficient,
+   or what they can provide, answer it using the session history and prior run results.
+   Explain concrete next steps in plain language; do not ask the user to clarify the
+   follow-up itself unless it is genuinely ambiguous.
+7. Do NOT output private reasoning, chain-of-thought, or internal justifications."""
 
 
 class ContextBuilder:

@@ -7,6 +7,7 @@ from adapters.embeddings.sentence_transformers import SentenceTransformerEmbeddi
 from adapters.llm.google import GoogleGeminiAdapter
 from adapters.reranking.baseline import DeterministicBaselineReranker
 from adapters.vectorstores.pgvector import PgVectorStore
+from adapters.web.adk_search import WebSearchAdapter
 from adapters.web.fallback import MockWebSearchAdapter
 from app.config import settings
 from application.cache_service import CacheService
@@ -99,6 +100,12 @@ def get_reranker() -> Reranker:
 
 @lru_cache
 def get_web_search_provider() -> WebSearchProvider:
+    if settings.web_search_enabled or settings.google_api_key or settings.tavily_api_key:
+        return WebSearchAdapter(
+            google_api_key=settings.google_api_key,
+            tavily_api_key=settings.tavily_api_key,
+            offline_fallback=MockWebSearchAdapter(),
+        )
     return MockWebSearchAdapter()
 
 

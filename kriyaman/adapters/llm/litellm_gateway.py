@@ -50,7 +50,7 @@ class LiteLLMGatewayAdapter(LLMProvider):
         groq_api_key: str = "",
         planner_model: str = "groq/openai/gpt-oss-20b",
         judge_model: str = "groq/openai/gpt-oss-20b",
-        generator_model: str = "gemini/gemini-2.5-flash",
+        generator_model: str = "gemini/gemini-3.6-flash",
         planner_fallback_models: list[str] | None = None,
         judge_fallback_models: list[str] | None = None,
         generator_fallback_models: list[str] | None = None,
@@ -64,11 +64,19 @@ class LiteLLMGatewayAdapter(LLMProvider):
         self.planner_model = planner_model
         self.judge_model = judge_model
         self.generator_model = generator_model
-        self.planner_fallback_models = planner_fallback_models or ["groq/openai/gpt-oss-120b"]
-        self.judge_fallback_models = judge_fallback_models or ["groq/openai/gpt-oss-120b"]
+        self.planner_fallback_models = planner_fallback_models or [
+            "groq/openai/gpt-oss-120b",
+            "gemini/gemini-3.6-flash",
+            "gemini/gemini-3.1-flash-lite",
+        ]
+        self.judge_fallback_models = judge_fallback_models or [
+            "groq/openai/gpt-oss-120b",
+            "gemini/gemini-3.6-flash",
+            "gemini/gemini-3.1-flash-lite",
+        ]
         self.generator_fallback_models = generator_fallback_models or [
             "groq/openai/gpt-oss-120b",
-            "gemini/gemini-1.5-flash",
+            "gemini/gemini-3.1-flash-lite",
         ]
         self.temperature = temperature
         self.timeout_seconds = timeout_seconds

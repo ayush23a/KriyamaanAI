@@ -110,13 +110,29 @@ class RunExecutionService:
 
         memory_items: list[MemoryItem] = [
             MemoryItem(
-                memory_id=m.id,
-                principal_id=m.memory_principal_id,
+                id=m.id,
+                memory_principal_id=m.memory_principal_id,
                 content=m.content,
                 kind=m.kind,
             )
             for m in memories
         ]
+        memory_items.extend(
+            MemoryItem(
+                id=f"turn_{turn.id}",
+                memory_principal_id=principal_id,
+                content=f"User: {turn.user_query}\nAssistant: {answer_text}",
+                kind="session_turn",
+            )
+            for turn in recent_turns
+            for answer_text in [
+                (
+                    turn.answer_json.get("answer_text", "")
+                    if turn.answer_json and isinstance(turn.answer_json, dict)
+                    else ""
+                )
+            ]
+        )
 
         # 3. Create run record
         run_id = str(uuid.uuid4())
@@ -207,4 +223,3 @@ class RunExecutionService:
             "status": final_state["status"],
             "state": final_state,
         }
-

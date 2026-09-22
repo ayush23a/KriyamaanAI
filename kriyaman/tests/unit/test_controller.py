@@ -14,6 +14,17 @@ def test_controller_greeting_no_acquisition():
     assert plan.expected_information_gain == "low"
 
 
+def test_controller_follow_up_about_missing_information_is_conversational():
+    controller = AgentController()
+    plan = controller.decide(
+        query="What additional information can I provide?",
+        normalized_query="what additional information can i provide",
+        session_history=["User: Check the ledger\nAssistant: I need more verified evidence."],
+    )
+    assert plan.action == "no_acquisition_required"
+    assert plan.reason_code == "conversation_follow_up_help"
+
+
 def test_controller_tool_call_request():
     registry = FakeToolRegistry()
     controller = AgentController(tool_registry=registry)
@@ -191,4 +202,3 @@ def test_controller_refine_never_appends_stopwords():
     )
     assert "algorithms" in refined.query
     assert not any(sw in refined.query.split() for sw in ["what", "this", "are"])
-

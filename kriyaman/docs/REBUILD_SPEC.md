@@ -40,6 +40,8 @@ The first release explicitly does **not** include authentication, authorization/
 9. **Safe degradation.** Langfuse and Redis failures must never break core correctness: observability becomes best-effort and cache misses fall back to PostgreSQL wherever possible. Optional web/tool provider failures are structured capability failures and must not become evidence.
 10. **No hidden chain-of-thought.** Persist and expose decisions as concise structured fields (`action`, `reason_code`, `confidence`, `budget_effect`, `evidence_ids`), never private reasoning text.
 11. **Probabilistic planning inside a deterministic envelope.** LLMs may interpret intent, propose acquisition plans, assess evidence, and suggest refinement. Deterministic validators, graph policies, budgets, authorization checks, evidence gates, citation validation, and persistence remain authoritative and must approve every action before execution.
+12. **Conversational multi-turn memory and follow-up interaction.** Kriyamaan operates as an interactive conversational assistant rather than a stateless one-shot lookup engine (mirroring the conversational paradigm of the Gemini app). Users can ask natural follow-up questions within an active session. The controller and Context Builder maintain bounded conversation history across turns, enabling coreference resolution ("what about its second clause?", "compare that to the first document") and conversational clarification when `needs_follow_up: True`.
+13. **Dynamic on-the-go document ingestion and provenance attribution.** Users can upload documents dynamically into an ongoing session. Ingestion, chunking, and pgvector embedding occur immediately scoped to that session. Subsequent turns immediately retrieve across both existing and newly added files, citing evidence with granular document- and chunk-level provenance (`[evidence_id]` referencing the specific uploaded file).
 
 ## 3. Target architecture
 
@@ -264,22 +266,34 @@ class AcquisitionPlan(BaseModel):
     intent: Literal[
         "summary", "advantages", "limitations", "findings", "factual_lookup",
         "synthesis", "comparison", "memory", "web", "tool", "clarification",
+        "synthesis", "comparison", "audit", "memory", "web", "tool", "clarification",
         "unsupported", "other"
     ]
     query: str | None
     query_variants: list[str] = []
     source_preferences: list[Literal["document", "memory", "web", "tool"]] = []
     filters: dict[str, str | int | bool] = {}
+    ] = "factual_lookup"
+    query: str | None = None
+    query_variants: list[str] = Field(default_factory=list)
+    source_preferences: list[Literal["document", "memory", "web", "tool"]] = Field(default_factory=list)
+    filters: dict[str, str | int | bool] = Field(default_factory=dict)
     top_k: int = 5
     rerank: bool = True
     tool_name: str | None = None
     tool_arguments: dict[str, Any] = {}
+    tool_arguments: dict[str, Any] = Field(default_factory=dict)
     reason_code: str
     expected_information_gain: Literal["low", "medium", "high"]
+    reasoning: str | None = None
+    expected_information_gain: Literal["low", "medium", "high"] = "medium"
     confidence: float | None = None
 ```
 
 The controller is an LLM-assisted semantic planner when an LLM provider is configured. It must understand paraphrases and user intent; it must not require exact document keywords. It must recognize at least summary/overview, advantages/strengths/benefits, limitations/risks/weaknesses, findings/results/conclusions, factual lookup, comparison, multi-document synthesis, clarification, unsupported requests, memory, web, and tool intents. Query variants should expand concepts semantically (for example, `advantages` to `benefits`, `strengths`, and `improvements`) without exposing hidden reasoning.
+The controller is an LLM-assisted semantic planner when an LLM provider is configured. It must understand paraphrases, domain operations, and user intent; it must not require exact document keywords. It must recognize at least summary/overview, advantages/strengths/benefits, limitations/risks/weaknesses, findings/results/conclusions, factual lookup, comparison, multi-document synthesis, audit/reconciliation (e.g. general ledger, chart of accounts, deposit cross-referencing), clarification, unsupported requests, memory, web, and tool intents. Query variants should expand concepts semantically (for example, `advantages` to `benefits`, `strengths`, and `improvements`) without exposing hidden reasoning.
+
+In multi-turn sessions, the controller incorporates prior conversation turns (`session_history`) to resolve pronouns, ellipsis, and contextual follow-ups (e.g., *"what about the second transaction?"*, *"drill down on that discrepancy"*, *"compare that with the previous table"*). Rather than treating follow-ups as disconnected searches, it formulates targeted acquisition queries anchored in the conversation context.
 
 The controller must not return arbitrary executable code, provider parameters outside configured limits, unrestricted SQL/shell commands, or hidden reasoning. The LLM only proposes a plan; it never invokes tools or changes budgets. Every plan must pass a deterministic plan/policy validator before retrieval or tool execution. Invalid output is a controlled run failure, deterministic safe fallback, or one bounded structured repair attempt using the same role route. The deterministic fallback controller may handle greetings and provider outages, but normal knowledge queries must not depend primarily on literal keyword rules.
 
@@ -438,6 +452,7 @@ Initial adapters:
 
 - **LLM:** LiteLLM gateway as the production adapter behind `LLMProvider`. Direct provider adapters such as Google Gemini may remain as test/reference adapters, but application code must not import LiteLLM or provider SDKs directly.
 - **LLM role routing:** configure models independently for `planner`, `judge`, and `generator`. The initial recommended routing is Groq `openai/gpt-oss-20b` for planner and judge, Gemini Flash for final generation, Groq `openai/gpt-oss-120b` for escalation or fallback, and a configured alternate Gemini/Groq route for generator fallback. Exact model identifiers and feature support must be verified in the installed LiteLLM/provider versions.
+- **LLM role routing:** configure models independently for `planner`, `judge`, and `generator`. The system routes generation to high-throughput Gemini Flash (`gemini/gemini-3.6-flash`, with `gemini/gemini-3.1-flash-lite` fallback). Planner and Judge roles support Groq (e.g. `llama-3.3-70b-versatile` or `openai/gpt-oss-20b`) with mandatory cross-provider fallback to `gemini/gemini-3.6-flash` and `gemini/gemini-3.1-flash-lite` to ensure the system is never stalled by provider-specific rate limits (such as free-tier 8k TPM ceilings) or schema truncation errors.
 - **LLM resilience:** the gateway owns bounded retries for idempotent transient failures, timeouts, retry/backoff, provider fallback, structured-output parsing, schema validation, usage normalization, estimated cost, and provider/model metadata. Retry counts and fallback calls must count against run budgets. Side-effecting tools must not be retried automatically unless explicitly idempotent.
 - **Embeddings:** Sentence Transformers/local adapter, with model and dimension recorded in the database.
 - **Vector store:** PostgreSQL pgvector adapter. This is the only vector-store implementation in this rebuild. Keep the `VectorStore` port for dependency inversion and future replacement, but implement only `PgVectorStore`.
@@ -445,6 +460,8 @@ Initial adapters:
 - **Reranker:** provider port with a deterministic local baseline allowed initially; do not couple retrieval to one vendor.
 - **Web search:** optional adapter selected by configuration; unavailable means a structured capability failure.
 - **Tools:** registry-backed, allowlisted tools only. Initial registry may contain formatting, visualization, file, email, and calendar adapters only when implemented and explicitly enabled. No arbitrary shell/code execution.
+- **Web search:** multi-provider adapter implementing Google Search (via Google ADK) as primary with Tavily as fallback, plus an offline mock adapter when network or keys are unavailable.
+- **Tools:** registry-backed, allowlisted tools only. The tool registry supports formatting tools (e.g. Markdown table formatter, structured data transformer), visualization tools (e.g. chart/graph definition generators, KPI plotters), calculation/reconciliation tools, and search capabilities. No arbitrary shell/code execution.
 
 ### 6.1 LiteLLM gateway contract
 
@@ -456,6 +473,10 @@ The gateway must:
 - route final generation to the configured Gemini Flash route by default;
 - escalate planner/judge calls to `openai/gpt-oss-120b` when configured thresholds indicate malformed output, low confidence, difficult synthesis, or unresolved conflict;
 - fail over across providers/models when a classified transient or capability failure occurs;
+- route planner and judge calls to the configured primary planner route (Groq or Gemini) with automatic cross-provider failover;
+- route final generation to `gemini/gemini-3.6-flash` by default;
+- escalate planner/judge calls when configured thresholds indicate malformed output, low confidence, difficult synthesis, or unresolved conflict;
+- fail over across providers/models immediately when a classified transient or capability failure occurs (including rate limit 429/TPM errors or schema validation errors);
 - distinguish transient, timeout, rate-limit, validation, capability, budget, and permanent failures;
 - never turn a provider failure into a fabricated or success-shaped answer;
 - expose safe usage, cost, retry, fallback, latency, provider, and model metadata;
@@ -469,6 +490,9 @@ Recommended initial routes:
 | `planner` | Groq `openai/gpt-oss-20b` | Groq `openai/gpt-oss-120b`, then deterministic safe fallback |
 | `judge` | Groq `openai/gpt-oss-20b` | Groq `openai/gpt-oss-120b`, then conservative deterministic judge |
 | `generator` | Configured Gemini Flash | Groq `openai/gpt-oss-120b` or alternate configured Gemini model, then explicit failure/abstention |
+| `planner` | `gemini/gemini-3.6-flash` or Groq `llama-3.3-70b-versatile` | `gemini/gemini-3.6-flash`, `gemini/gemini-3.1-flash-lite`, then safe heuristic fallback |
+| `judge` | `gemini/gemini-3.6-flash` or Groq `llama-3.3-70b-versatile` | `gemini/gemini-3.6-flash`, `gemini/gemini-3.1-flash-lite`, then conservative deterministic judge |
+| `generator` | `gemini/gemini-3.6-flash` | `gemini/gemini-3.1-flash-lite` or Groq `llama-3.3-70b-versatile`, then explicit failure/abstention |
 
 The gateway is not an authorization layer. It must not decide whether a tool, source, budget, or output is permitted.
 
@@ -517,6 +541,7 @@ The required minimum guardrails are:
 
 1. **Prompt-injection detection.** Run on the raw user query, uploaded/retrieved document content, web results, and tool arguments before those values reach an LLM or tool. Treat documents and web results as untrusted data, never as instructions. Context prompts must delimit evidence and state that it is source material, not executable instructions. Use deterministic regex/suspicious-marker checks first and an optional semantic classifier only through the LLM gateway. Suspicious content must be rejected, warned, or isolated according to configuration; it must never silently override system policy.
 2. **PII middleware.** Run before external LLM calls, before embeddings when configured by privacy policy, on retrieved evidence and tool arguments, on model output before persistence/display, and on observability payloads. At minimum detect common email, phone, card, bank-account, routing/IFSC-like, government/tax, address, and transaction/reference identifiers. Support detect-only, mask/redact, and reject modes. Raw PII must not be logged or sent to Langfuse by default.
+2. **PII middleware.** Run before external LLM calls, before embeddings when configured by privacy policy, on retrieved evidence and tool arguments, on model output before persistence/display, and on observability payloads. At minimum detect common email, phone, card, bank-account, routing/IFSC-like, government/tax, address, and transaction/reference identifiers. Financial account patterns must strictly match actual numeric account numbers (e.g. 8–17 digits) or standard routing/IBAN formats, and must explicitly avoid matching common business and document terminology such as 'Bank Statement', 'Bank Account', 'Account List', or 'Bank Checking'. Support detect-only, mask/redact, and reject modes. Raw PII must not be logged or sent to Langfuse by default.
 3. **Regex matching.** Use deterministic regex rules for prompt-injection markers, PII patterns, dangerous SQL/shell/code tool arguments, disallowed URLs/domains, citation IDs, and malformed/unsafe output. Regex is a first-pass control and must not be treated as complete semantic protection.
 
 Guardrail results must be typed and auditable without retaining sensitive payloads:
@@ -629,6 +654,26 @@ FastAPI is the authoritative application boundary. Pydantic request/response mod
 | `DELETE` | `/api/v1/memories/{memory_id}` | Delete an explicit memory |
 
 `POST /runs` request must include `query` and may include `budgets`, `response_mode`, and `enable_web_search`. It returns `run_id`, initial status, and a polling/event URL. Streaming is optional in the first implementation, but the event model must support it so Streamlit does not depend on internal Python objects.
+`POST /runs` request must include `query` and may include `budgets`, `response_mode`, and `enable_web_search`. It returns `run_id`, initial status, and a polling/event URL. Streaming is supported in the event model so clients do not depend on internal Python objects.
+
+### 9.1 Dynamic on-the-go document ingestion lifecycle
+
+The document ingestion endpoint (`POST /api/v1/sessions/{session_id}/documents`) supports dynamic, mid-conversation file additions:
+1. Users may upload one or more documents (PDF, DOCX, TXT, Markdown, HTML) at any point during an active session.
+2. The ingestion pipeline executes immediately upon upload:
+   - file parsing and text extraction;
+   - deterministic chunking with configurable overlap;
+   - local Sentence Transformer embedding computation;
+   - transactional upsert into `documents` and `document_chunks` with pgvector embeddings scoped by `session_id`.
+3. Newly uploaded documents are searchable immediately on the very next query run. Subsequent questions can compare, reconcile, and synthesize evidence across all files in that session with exact document and chunk citation provenance.
+
+### 9.2 Conversational multi-turn session lifecycle
+
+Each session maintains an ordered sequence of conversation turns (`conversation_turns` table):
+1. When a user submits a follow-up query, `load_session_memory` populates bounded recent turns into graph state (`session_history`).
+2. The Agent Controller interprets ambiguous or pronoun-heavy follow-up questions within the context of recent turns.
+3. The generation LLM receives prior turns in the context package, enabling natural multi-turn dialogue (similar to the Gemini app document chat experience).
+4. Answers specify `needs_follow_up: True` whenever an inquiry suggests logical next steps, deeper drill-downs, or requires user input.
 
 Errors use a stable envelope:
 
@@ -952,6 +997,14 @@ At the end of Phases 1–5, run the core sanity/smoke-test milestone before impl
 - Tune Redis TTLs, cache key cardinality, invalidation, and serialization limits from measured behavior.
 - Optimize retrieval, reranking, context budgets, provider latency, and estimated cost without weakening evidence-before-generation policy.
 - Document operational settings and failure modes.
+- **Coreference resolution for follow-up chat:** optimize multi-turn conversational retrieval by resolving pronouns and implicit references against prior turns before vector search.
+- **Session-scoped hybrid retrieval (BM25 + pgvector):** combine sparse keyword matching with dense semantic embeddings to improve retrieval accuracy on dense tabular, financial, and numerical data where exact codes/names matter.
+- **Token streaming for conversational UI:** implement Server-Sent Events (SSE) streaming from the generation node to thin clients to provide live, conversational response rendering.
+- **Dynamic visualization and tool expansion:** implement rich formatting and visualization tools in the Tool Registry (e.g. automated chart/table generation, calculation helpers) that the Agent Controller can invoke to accompany narrative answers.
+- **Load testing and bounded execution:** load-test concurrent bounded execution, database indexes, and connection pooling.
+- **Cache and latency tuning:** tune Redis TTLs, cache key cardinality, invalidation rules, and serialization limits from measured behavior.
+- **Provider latency and resilience optimization:** calibrate model routes and adaptive retry backoffs to maximize throughput while avoiding rate-limit bottlenecks.
+- **Document operational settings and failure modes.**
 
 **Exit:** regression reports are actionable, performance is measured, and all required test layers pass.
 

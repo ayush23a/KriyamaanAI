@@ -22,6 +22,7 @@ redis>=5.0.0
 langgraph>=0.2.0
 langchain-core>=0.3.0
 google-genai>=0.1.0
+google-adk>=2.9.0
 litellm>=1.50.0
 
 # Embeddings & Documents

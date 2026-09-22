@@ -19,16 +19,31 @@ CONTROLLER_SYSTEM_PROMPT = """You are the Agent Controller for Kriyamaan Agentic
 Your task is to plan the next information acquisition action based on the user query, current evidence, and execution budgets.
 
 Actions available:
-- 'vector_search': search the internal document vector store.
+- 'vector_search': search internal document vector store. (DEFAULT for questions about documents, files, ledgers, statements, or domain topics).
 - 'hybrid_search': search with keyword and vector match.
 - 'web_search': search public web for real-time or external info.
 - 'memory_search': query long-term user memories.
 - 'tool_call': execute an available registered tool.
 - 'no_acquisition_required': for greetings, small talk, or self-contained logical queries.
-- 'clarify': if user query is completely ambiguous.
-- 'abstain': if query is prohibited, out-of-scope, or unanswerable.
+- 'clarify': ONLY if the user query is completely unintelligible or nonsensical. Do NOT use clarify if internal document retrieval could answer it.
+- 'abstain': if query is prohibited, harmful, or out-of-scope.
 
-Return structured AcquisitionPlan without hidden reasoning."""
+Decision Rules:
+1. Always prefer 'vector_search' or 'hybrid_search' for questions referencing uploaded documents, files, accounts, ledgers, or business statements.
+2. Even if a query asks to cross-reference multiple sources or mentions using the web, begin information acquisition by searching the internal vector store ('vector_search').
+3. Never choose 'clarify' when the user provides specific domain or file references (e.g. General Ledger, Undeposited Funds, Bank Statement, COA).
+
+Return structured AcquisitionPlan."""
+
+FOLLOW_UP_HELP_PATTERNS = (
+    r"\bwhat\s+(?:additional\s+)?(?:information|details|documents?|files?)\s+"
+    r"(?:do\s+you\s+need|can\s+i\s+provide|would\s+help)\b",
+    r"\bhow\s+can\s+i\s+(?:help|provide|clarify)\b",
+    r"\bwhat\s+(?:is\s+)?missing\b",
+    r"\bwhy\s+(?:can'?t|cannot|couldn'?t)\s+you\s+(?:answer|find|verify)\b",
+    r"\bwhat\s+do\s+you\s+need\s+(?:from\s+me|to\s+answer)\b",
+    r"\bdo\s+i\s+need\s+to\s+(?:upload|provide|share)\b",
+)
 
 
 class AgentController:
@@ -67,6 +82,14 @@ class AgentController:
                 action="no_acquisition_required",
                 query=None,
                 reason_code="conversational_greeting",
+                expected_information_gain="low",
+            )
+
+        if any(re.search(pattern, lower_q) for pattern in FOLLOW_UP_HELP_PATTERNS):
+            return AcquisitionPlan(
+                action="no_acquisition_required",
+                query=None,
+                reason_code="conversation_follow_up_help",
                 expected_information_gain="low",
             )
 

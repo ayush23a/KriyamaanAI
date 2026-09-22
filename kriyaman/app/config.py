@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     google_api_key: str = ""
     groq_api_key: str = ""
     llm_model: str = "gemini-2.5-flash"
+    llm_model: str = "gemini/gemini-3.6-flash"
     llm_temperature: float = 0.0
     llm_timeout_seconds: float = 30.0
     llm_max_retries: int = 1
@@ -44,6 +45,10 @@ class Settings(BaseSettings):
     planner_fallback_models: list[str] = Field(default_factory=lambda: ["groq/openai/gpt-oss-120b"])
     judge_fallback_models: list[str] = Field(default_factory=lambda: ["groq/openai/gpt-oss-120b"])
     generator_fallback_models: list[str] = Field(default_factory=lambda: ["groq/openai/gpt-oss-120b", "gemini/gemini-1.5-flash"])
+    generator_model: str = "gemini/gemini-3.6-flash"
+    planner_fallback_models: list[str] = Field(default_factory=lambda: ["groq/openai/gpt-oss-120b", "gemini/gemini-3.6-flash", "gemini/gemini-3.1-flash-lite"])
+    judge_fallback_models: list[str] = Field(default_factory=lambda: ["groq/openai/gpt-oss-120b", "gemini/gemini-3.6-flash", "gemini/gemini-3.1-flash-lite"])
+    generator_fallback_models: list[str] = Field(default_factory=lambda: ["groq/openai/gpt-oss-120b", "gemini/gemini-3.1-flash-lite"])
 
     # Guardrails
     pii_mode: str = "mask"  # "detect", "mask", "reject", "off"

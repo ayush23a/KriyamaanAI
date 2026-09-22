@@ -67,6 +67,7 @@ class AcquisitionPlan(BaseModel):
     tool_name: str | None = None
     tool_arguments: dict[str, Any] = Field(default_factory=dict)
     reason_code: str
+    reasoning: str | None = None
     expected_information_gain: Literal["low", "medium", "high"] = "medium"
     confidence: float | None = None
 

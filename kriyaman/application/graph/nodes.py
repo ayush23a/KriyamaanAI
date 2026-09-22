@@ -161,6 +161,11 @@ class GraphNodes:
         plan = self.controller.decide(
             query=state["user_query"],
             normalized_query=state["normalized_query"],
+            session_history=[
+                m.content
+                for m in state.get("memory_items", [])
+                if m.kind == "session_turn"
+            ],
             memory_items=state.get("memory_items"),
             budgets=state["budgets"],
             usage=state["usage"],
@@ -488,8 +493,16 @@ class GraphNodes:
 
     # Terminal state handlers
     def clarification_terminal(self, state: GraphState) -> dict[str, Any]:
+        plan = state.get("controller_plan")
+        text = "Could you please clarify your request?"
+        reason_detail = getattr(plan, "reasoning", None) or getattr(plan, "reason_code", None)
+        if plan and plan.query and plan.query.strip() and plan.query != state.get("normalized_query"):
+            text = f"Could you please clarify: {plan.query.strip()}"
+        elif reason_detail and str(reason_detail).strip():
+            text = f"Could you please clarify: {str(reason_detail).strip()}"
+
         answer = Answer(
-            answer_text="Could you please clarify your request?",
+            answer_text=text,
             citation_ids=[],
             confidence=1.0,
             needs_follow_up=True,
