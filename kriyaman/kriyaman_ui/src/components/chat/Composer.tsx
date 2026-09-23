@@ -8,8 +8,14 @@ import {
   Globe,
   Database,
   SlidersHorizontal,
+  X,
+  FileText,
+  CheckCircle2,
+  AlertCircle,
+  Loader2,
 } from 'lucide-react';
-import { cn } from '../../lib/utils';
+import { cn, formatFileSize } from '../../lib/utils';
+import { UploadingAttachment } from '../../types';
 
 interface ComposerProps {
   onSendMessage: (query: string, enableWeb: boolean) => void;
@@ -21,6 +27,8 @@ interface ComposerProps {
   initialQuery?: string;
   defaultEnableWeb?: boolean;
   documentCount?: number;
+  uploadingAttachments?: UploadingAttachment[];
+  onRemoveAttachment?: (id: string) => void;
 }
 
 export const Composer: React.FC<ComposerProps> = ({
@@ -33,6 +41,8 @@ export const Composer: React.FC<ComposerProps> = ({
   initialQuery = '',
   defaultEnableWeb = false,
   documentCount = 0,
+  uploadingAttachments = [],
+  onRemoveAttachment,
 }) => {
   const [query, setQuery] = useState(initialQuery);
   const [enableWeb, setEnableWeb] = useState(defaultEnableWeb);
@@ -81,6 +91,17 @@ export const Composer: React.FC<ComposerProps> = ({
     }
   };
 
+  const getFileIcon = (filename: string) => {
+    const ext = filename.split('.').pop()?.toLowerCase();
+    if (ext === 'pdf') {
+      return <FileText className="w-4 h-4 text-red-600" />;
+    }
+    if (ext === 'doc' || ext === 'docx') {
+      return <FileText className="w-4 h-4 text-blue-600" />;
+    }
+    return <FileText className="w-4 h-4 text-[#C25E43]" />;
+  };
+
   return (
     <div className="w-full max-w-3xl mx-auto px-4 pb-4 sm:pb-6">
       <div className="relative rounded-2xl border border-[#E7E2DA] bg-white shadow-xs focus-within:border-[#C25E43] focus-within:ring-1 focus-within:ring-[#C25E43]/20 transition-all">
@@ -92,6 +113,70 @@ export const Composer: React.FC<ComposerProps> = ({
           onChange={handleFileChange}
           accept=".pdf,.docx,.txt,.md,.html"
         />
+
+        {/* Uploading Attachments Preview Pill Bar (Gemini / Claude / ChatGPT style) */}
+        {uploadingAttachments && uploadingAttachments.length > 0 && (
+          <div className="flex flex-wrap gap-2 px-4 pt-3 pb-2 border-b border-[#F2EDE4]/80">
+            {uploadingAttachments.map((att) => (
+              <div
+                key={att.id}
+                className={cn(
+                  'flex items-center gap-2.5 px-3 py-2 rounded-xl border transition-all text-xs max-w-xs group shadow-2xs',
+                  att.status === 'error'
+                    ? 'bg-red-50/70 border-red-200'
+                    : att.status === 'uploading'
+                    ? 'bg-[#FAF8F5] border-[#E7E2DA]'
+                    : 'bg-[#F4F6F0]/70 border-[#DCE4D0]'
+                )}
+              >
+                {/* File Icon */}
+                <div className="w-7 h-7 rounded-lg bg-white border border-[#E7E2DA] flex items-center justify-center flex-shrink-0 shadow-3xs">
+                  {getFileIcon(att.name)}
+                </div>
+
+                {/* File Details */}
+                <div className="min-w-0 flex-1">
+                  <p className="font-semibold text-stone-900 truncate text-[12px] leading-tight" title={att.name}>
+                    {att.name}
+                  </p>
+                  <div className="flex items-center gap-1.5 text-[10px] text-stone-500 font-mono mt-0.5">
+                    {att.status === 'uploading' && (
+                      <span className="inline-flex items-center gap-1 text-[#C25E43] font-sans">
+                        <Loader2 className="w-2.5 h-2.5 animate-spin" />
+                        <span>Indexing vectors...</span>
+                      </span>
+                    )}
+                    {att.status === 'completed' && (
+                      <span className="inline-flex items-center gap-1 text-[#5F7143] font-sans font-medium">
+                        <CheckCircle2 className="w-2.5 h-2.5" />
+                        <span>{att.chunkCount ? `${att.chunkCount} chunks` : 'Indexed'}</span>
+                      </span>
+                    )}
+                    {att.status === 'error' && (
+                      <span className="inline-flex items-center gap-1 text-red-600 font-sans">
+                        <AlertCircle className="w-2.5 h-2.5" />
+                        <span>{att.error || 'Upload failed'}</span>
+                      </span>
+                    )}
+                    <span>• {formatFileSize(att.size)}</span>
+                  </div>
+                </div>
+
+                {/* Close / Dismiss button */}
+                {onRemoveAttachment && (
+                  <button
+                    type="button"
+                    onClick={() => onRemoveAttachment(att.id)}
+                    className="p-1 rounded-md text-stone-400 hover:text-stone-700 hover:bg-[#E7E2DA]/60 transition-colors cursor-pointer"
+                    title="Remove attachment preview"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
 
         {/* Text Input Area */}
         <div className="px-4 pt-3.5 pb-2">

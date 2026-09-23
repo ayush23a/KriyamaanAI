@@ -82,11 +82,13 @@ def detect_query_intent(query: str) -> str:
     # 1. Summary / Overview / Broad document topic
     if re.search(
         r"\b(summar(?:y|ise|ize)|overview|key points?|main points?|tell us about|"
-        r"tell me about the (?:files?|documents?)|"
-        r"what do(?:es)? (?:the|these|all)? ?(?:uploaded )?(?:files?|documents?|texts?) tell|"
-        r"what (?:are|is) (?:the|these|all)? ?(?:uploaded )?(?:files?|documents?|texts?) about|"
+        r"tell me about (?:this|the|that) (?:files?|documents?)|"
+        r"what do(?:es)? (?:this|that|the|these|those|all)? ?(?:uploaded )?(?:files?|documents?|texts?|doc|pdf) (?:tell|convey|explain|say)|"
+        r"what (?:are|is) (?:this|that|the|these|those|all)? ?(?:uploaded )?(?:files?|documents?|texts?|doc|pdf) about|"
+        r"what information do(?:es)? (?:this|that|the|these|those|all)? ?(?:files?|documents?|texts?|doc|pdf) convey|"
         r"what does the uploaded files? tell us about|"
-        r"give me an overview|brief overview|high level overview)\b",
+        r"give me an overview|brief overview|high level overview|"
+        r"what (?:is|are) in (?:this|that|the) (?:file|document|doc|pdf))\b",
         normalized,
     ):
         return "summary"

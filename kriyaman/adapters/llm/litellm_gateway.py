@@ -48,8 +48,9 @@ class LiteLLMGatewayAdapter(LLMProvider):
         self,
         google_api_key: str = "",
         groq_api_key: str = "",
-        planner_model: str = "groq/openai/gpt-oss-20b",
-        judge_model: str = "groq/openai/gpt-oss-20b",
+        groq_api_key_secondary: str = "",
+        planner_model: str = "groq/qwen/qwen3.8-27b",
+        judge_model: str = "gemini/gemini-3.6-flash",
         generator_model: str = "gemini/gemini-3.6-flash",
         planner_fallback_models: list[str] | None = None,
         judge_fallback_models: list[str] | None = None,
@@ -61,6 +62,7 @@ class LiteLLMGatewayAdapter(LLMProvider):
     ) -> None:
         self.google_api_key = google_api_key
         self.groq_api_key = groq_api_key
+        self.groq_api_key_secondary = groq_api_key_secondary
         self.planner_model = planner_model
         self.judge_model = judge_model
         self.generator_model = generator_model
@@ -70,22 +72,30 @@ class LiteLLMGatewayAdapter(LLMProvider):
             "gemini/gemini-3.1-flash-lite",
         ]
         self.judge_fallback_models = judge_fallback_models or [
-            "groq/openai/gpt-oss-120b",
-            "gemini/gemini-3.6-flash",
+            "groq/qwen/qwen3.8-27b",
             "gemini/gemini-3.1-flash-lite",
         ]
         self.generator_fallback_models = generator_fallback_models or [
-            "groq/openai/gpt-oss-120b",
             "gemini/gemini-3.1-flash-lite",
+            "groq/qwen/qwen3.8-27b",
         ]
         self.temperature = temperature
         self.timeout_seconds = timeout_seconds
         self.max_retries = max_retries
         self.retry_backoff = retry_backoff
+        self.cumulative_usage = UsageSnapshot()
+
+    def reset_cumulative_usage(self) -> UsageSnapshot:
+        prev = self.cumulative_usage
+        self.cumulative_usage = UsageSnapshot()
+        return prev
 
     def _sanitize(self, message: str) -> str:
-        secrets = [s for s in [self.google_api_key, self.groq_api_key] if s and len(s) > 4]
-        for env_var in ["GROQ_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY"]:
+        secrets = [
+            s for s in [self.google_api_key, self.groq_api_key, self.groq_api_key_secondary]
+            if s and len(s) > 4
+        ]
+        for env_var in ["GROQ_API_KEY", "GROQ_API_KEY_1", "GROQ_API_KEY_2", "GROQ_API_KEY_SECONDARY", "GOOGLE_API_KEY", "GEMINI_API_KEY"]:
             val = os.environ.get(env_var)
             if val and len(val) > 4:
                 secrets.append(val)
@@ -93,6 +103,12 @@ class LiteLLMGatewayAdapter(LLMProvider):
         for secret in secrets:
             sanitized = sanitized.replace(secret, "[REDACTED_SECRET]")
         return sanitized
+
+    def _normalize_model_name(self, model: str) -> str:
+        stripped = model.strip()
+        if stripped.startswith("qwen/") or stripped.startswith("openai/"):
+            return f"groq/{stripped}"
+        return stripped
 
     def _get_models_for_role(self, role: LLMCallRole) -> list[str]:
         if role == LLMCallRole.PLANNER:
@@ -108,17 +124,25 @@ class LiteLLMGatewayAdapter(LLMProvider):
                 ordered.append(c)
         return ordered
 
-    def _get_api_key_for_model(self, model: str) -> str | None:
+    def _get_api_keys_for_model(self, model: str) -> list[str]:
         model_lower = model.lower()
-        if "groq" in model_lower:
-            return self.groq_api_key or os.environ.get("GROQ_API_KEY")
+        if "groq" in model_lower or "qwen" in model_lower:
+            key1 = self.groq_api_key or os.environ.get("GROQ_API_KEY") or os.environ.get("GROQ_API_KEY_1", "")
+            key2 = self.groq_api_key_secondary or os.environ.get("GROQ_API_KEY_SECONDARY") or os.environ.get("GROQ_API_KEY_2", "")
+            # If model is qwen and key2 is present, prioritize key2
+            keys = [key2, key1] if ("qwen" in model_lower and key2) else [key1, key2]
+            valid_keys = [k for k in keys if k]
+            return valid_keys if valid_keys else ([key1] if key1 else [])
         if "gemini" in model_lower:
-            return (
+            key = (
                 self.google_api_key
                 or os.environ.get("GOOGLE_API_KEY")
                 or os.environ.get("GEMINI_API_KEY")
+                or ""
             )
-        return self.google_api_key or self.groq_api_key or None
+            return [key] if key else []
+        fallback_key = self.google_api_key or self.groq_api_key or ""
+        return [fallback_key] if fallback_key else []
 
     def _calculate_usage(
         self,
@@ -134,17 +158,33 @@ class LiteLLMGatewayAdapter(LLMProvider):
         cost_usd = Decimal("0.0")
         try:
             cost = litellm.completion_cost(completion_response=response)
-            if cost is not None:
+            if cost is not None and cost > 0:
                 cost_usd = Decimal(str(round(cost, 6)))
         except Exception:
             pass
 
-        return UsageSnapshot(
+        if cost_usd <= 0 and (input_tokens > 0 or output_tokens > 0):
+            # Standard token fallback: $0.15/1M input, $0.60/1M output
+            est = (input_tokens * Decimal("0.00000015")) + (output_tokens * Decimal("0.00000060"))
+            cost_usd = Decimal(str(round(float(est), 6)))
+            if cost_usd == Decimal("0.0"):
+                cost_usd = Decimal("0.000001")
+
+        snap = UsageSnapshot(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             latency_ms=latency_ms,
             estimated_cost_usd=cost_usd,
         )
+
+        self.cumulative_usage = UsageSnapshot(
+            input_tokens=self.cumulative_usage.input_tokens + snap.input_tokens,
+            output_tokens=self.cumulative_usage.output_tokens + snap.output_tokens,
+            latency_ms=self.cumulative_usage.latency_ms + snap.latency_ms,
+            estimated_cost_usd=self.cumulative_usage.estimated_cost_usd + snap.estimated_cost_usd,
+        )
+
+        return snap
 
     def generate_text(
         self,
@@ -160,55 +200,67 @@ class LiteLLMGatewayAdapter(LLMProvider):
         last_exc: Exception | None = None
 
         for model in models:
-            api_key = self._get_api_key_for_model(model)
-            if not api_key:
-                logger.debug("Skipping model %s: no API key configured", model)
+            norm_model = self._normalize_model_name(model)
+            api_keys = self._get_api_keys_for_model(norm_model)
+            if not api_keys:
+                logger.debug("Skipping model %s: no API key configured", norm_model)
                 last_exc = ProviderError(
-                    f"No API key configured for model {model}",
+                    f"No API key configured for model {norm_model}",
                     provider_name="litellm_gateway",
                 )
                 continue
 
-            for attempt in range(1 + self.max_retries):
-                start_time = time.time()
-                try:
-                    kwargs: dict[str, Any] = {
-                        "model": model,
-                        "messages": litellm_messages,
-                        "temperature": self.temperature,
-                        "timeout": timeout,
-                        "api_key": api_key,
-                    }
-                    if max_tokens:
-                        kwargs["max_tokens"] = max_tokens
+            for key_idx, api_key in enumerate(api_keys):
+                for attempt in range(1 + self.max_retries):
+                    start_time = time.time()
+                    try:
+                        kwargs: dict[str, Any] = {
+                            "model": norm_model,
+                            "messages": litellm_messages,
+                            "temperature": self.temperature,
+                            "timeout": timeout,
+                            "api_key": api_key,
+                        }
+                        if max_tokens:
+                            kwargs["max_tokens"] = max_tokens
 
-                    response = litellm.completion(**kwargs)
-                    latency_ms = int((time.time() - start_time) * 1000)
+                        response = litellm.completion(**kwargs)
+                        latency_ms = int((time.time() - start_time) * 1000)
 
-                    content = ""
-                    if response.choices and len(response.choices) > 0:
-                        content = response.choices[0].message.content or ""
+                        content = ""
+                        if response.choices and len(response.choices) > 0:
+                            content = response.choices[0].message.content or ""
 
-                    usage = self._calculate_usage(response, latency_ms)
-                    return ProviderResult(
-                        data=content,
-                        usage=usage,
-                        metadata={"model": model, "role": role.value},
-                    )
-                except Exception as exc:
-                    last_exc = exc
-                    sanitized_msg = self._sanitize(str(exc))
-                    logger.warning(
-                        "LiteLLM call failed (model=%s, attempt=%d/%d): %s",
-                        model,
-                        attempt + 1,
-                        1 + self.max_retries,
-                        sanitized_msg,
-                    )
-                    if attempt < self.max_retries:
-                        time.sleep(self.retry_backoff * (2**attempt))
-                    else:
-                        break  # Escalate to next model
+                        usage = self._calculate_usage(response, latency_ms)
+                        return ProviderResult(
+                            data=content,
+                            usage=usage,
+                            metadata={"model": norm_model, "role": role.value},
+                        )
+                    except Exception as exc:
+                        last_exc = exc
+                        sanitized_msg = self._sanitize(str(exc))
+                        is_rate_limit = (
+                            isinstance(exc, litellm.RateLimitError)
+                            or "rate_limit" in str(exc).lower()
+                            or "429" in str(exc)
+                        )
+                        logger.warning(
+                            "LiteLLM call failed (model=%s, key_idx=%d, attempt=%d/%d, is_rate_limit=%s): %s",
+                            norm_model,
+                            key_idx,
+                            attempt + 1,
+                            1 + self.max_retries,
+                            is_rate_limit,
+                            sanitized_msg,
+                        )
+                        if is_rate_limit:
+                            # If another key exists, try next key immediately; otherwise escalate to next model
+                            break
+                        if attempt < self.max_retries:
+                            time.sleep(self.retry_backoff * (2**attempt))
+                        else:
+                            break
 
         raise ProviderError(
             self._sanitize(
@@ -246,75 +298,97 @@ class LiteLLMGatewayAdapter(LLMProvider):
         last_exc: Exception | None = None
 
         for model in models:
-            api_key = self._get_api_key_for_model(model)
-            if not api_key:
-                logger.debug("Skipping model %s: no API key configured", model)
+            norm_model = self._normalize_model_name(model)
+            api_keys = self._get_api_keys_for_model(norm_model)
+            if not api_keys:
+                logger.debug("Skipping model %s: no API key configured", norm_model)
                 last_exc = ProviderError(
-                    f"No API key configured for model {model}",
+                    f"No API key configured for model {norm_model}",
                     provider_name="litellm_gateway",
                 )
                 continue
 
-            for attempt in range(1 + self.max_retries):
-                start_time = time.time()
-                try:
-                    kwargs: dict[str, Any] = {
-                        "model": model,
-                        "messages": litellm_messages,
-                        "temperature": self.temperature,
-                        "timeout": timeout,
-                        "api_key": api_key,
-                        "response_format": {"type": "json_object"},
-                    }
-                    if max_tokens:
-                        kwargs["max_tokens"] = max_tokens
-
+            for key_idx, api_key in enumerate(api_keys):
+                for attempt in range(1 + self.max_retries):
+                    start_time = time.time()
                     try:
-                        response = litellm.completion(**kwargs)
-                    except Exception:
-                        # Some providers do not support response_format={"type": "json_object"}, retry without it
-                        kwargs.pop("response_format", None)
-                        response = litellm.completion(**kwargs)
+                        kwargs: dict[str, Any] = {
+                            "model": norm_model,
+                            "messages": litellm_messages,
+                            "temperature": self.temperature,
+                            "timeout": timeout,
+                            "api_key": api_key,
+                            "response_format": {"type": "json_object"},
+                        }
+                        if max_tokens:
+                            kwargs["max_tokens"] = max_tokens
 
-                    latency_ms = int((time.time() - start_time) * 1000)
+                        try:
+                            response = litellm.completion(**kwargs)
+                        except Exception as inner_exc:
+                            # Never swallow RateLimitError or AuthError into formatting fallback
+                            if (
+                                isinstance(inner_exc, (litellm.RateLimitError, litellm.AuthenticationError))
+                                or "rate_limit" in str(inner_exc).lower()
+                                or "429" in str(inner_exc)
+                            ):
+                                raise inner_exc
+                            # Some providers do not support response_format={"type": "json_object"}, retry without it
+                            if "response_format" in kwargs:
+                                kwargs.pop("response_format", None)
+                                response = litellm.completion(**kwargs)
+                            else:
+                                raise inner_exc
 
-                    content = ""
-                    if response.choices and len(response.choices) > 0:
-                        content = response.choices[0].message.content or ""
+                        latency_ms = int((time.time() - start_time) * 1000)
 
-                    json_text = _extract_json_text(content)
-                    parsed_data = schema.model_validate_json(json_text)
+                        content = ""
+                        if response.choices and len(response.choices) > 0:
+                            content = response.choices[0].message.content or ""
 
-                    usage = self._calculate_usage(response, latency_ms)
-                    return ProviderResult(
-                        data=parsed_data,
-                        usage=usage,
-                        metadata={"model": model, "role": role.value},
-                    )
-                except ValidationError as v_exc:
-                    last_exc = v_exc
-                    logger.warning(
-                        "Schema validation failed for model %s (schema=%s): %s",
-                        model,
-                        schema.__name__,
-                        str(v_exc),
-                    )
-                    # Escalate to next model immediately on schema validation failure
-                    break
-                except Exception as exc:
-                    last_exc = exc
-                    sanitized_msg = self._sanitize(str(exc))
-                    logger.warning(
-                        "LiteLLM structured call failed (model=%s, attempt=%d/%d): %s",
-                        model,
-                        attempt + 1,
-                        1 + self.max_retries,
-                        sanitized_msg,
-                    )
-                    if attempt < self.max_retries:
-                        time.sleep(self.retry_backoff * (2**attempt))
-                    else:
-                        break  # Escalate to next model
+                        json_text = _extract_json_text(content)
+                        parsed_data = schema.model_validate_json(json_text)
+
+                        usage = self._calculate_usage(response, latency_ms)
+                        return ProviderResult(
+                            data=parsed_data,
+                            usage=usage,
+                            metadata={"model": norm_model, "role": role.value},
+                        )
+                    except ValidationError as v_exc:
+                        last_exc = v_exc
+                        logger.warning(
+                            "Schema validation failed for model %s (schema=%s): %s",
+                            norm_model,
+                            schema.__name__,
+                            str(v_exc),
+                        )
+                        # Escalate to next model immediately on schema validation failure
+                        break
+                    except Exception as exc:
+                        last_exc = exc
+                        sanitized_msg = self._sanitize(str(exc))
+                        is_rate_limit = (
+                            isinstance(exc, litellm.RateLimitError)
+                            or "rate_limit" in str(exc).lower()
+                            or "429" in str(exc)
+                        )
+                        logger.warning(
+                            "LiteLLM structured call failed (model=%s, key_idx=%d, attempt=%d/%d, is_rate_limit=%s): %s",
+                            norm_model,
+                            key_idx,
+                            attempt + 1,
+                            1 + self.max_retries,
+                            is_rate_limit,
+                            sanitized_msg,
+                        )
+                        if is_rate_limit:
+                            # If another key exists, try next key immediately; otherwise escalate to next model
+                            break
+                        if attempt < self.max_retries:
+                            time.sleep(self.retry_backoff * (2**attempt))
+                        else:
+                            break
 
         raise ProviderError(
             self._sanitize(

@@ -9,6 +9,7 @@ import {
   Check,
   Edit2,
   Sparkles,
+  Files,
 } from 'lucide-react';
 import { AppNavView } from '../../types';
 import { cn } from '../../lib/utils';
@@ -19,6 +20,8 @@ interface HeaderProps {
   onUpdateSessionTitle?: (newTitle: string) => void;
   onToggleInspector?: () => void;
   isInspectorOpen?: boolean;
+  onToggleArtifacts?: () => void;
+  isArtifactsOpen?: boolean;
   onOpenMobileSidebar?: () => void;
   documentCount?: number;
   enableWebSearch?: boolean;
@@ -31,6 +34,8 @@ export const Header: React.FC<HeaderProps> = ({
   onUpdateSessionTitle,
   onToggleInspector,
   isInspectorOpen = false,
+  onToggleArtifacts,
+  isArtifactsOpen = false,
   onOpenMobileSidebar,
   documentCount = 0,
   enableWebSearch = false,
@@ -114,39 +119,50 @@ export const Header: React.FC<HeaderProps> = ({
       <div className="flex items-center gap-2.5">
         {currentView === 'chat' && (
           <>
-            {/* Knowledge Scope Pill */}
-            <div className="hidden sm:flex items-center gap-2 px-2.5 py-1 rounded-lg bg-[#FAF8F5] border border-[#E7E2DA] text-xs text-stone-600 font-mono">
-              <span className="flex items-center gap-1">
-                <Database className="w-3 h-3 text-stone-500" />
-                <span>{documentCount} docs</span>
-              </span>
-              {enableWebSearch && (
-                <>
-                  <span className="text-stone-300">•</span>
-                  <span className="flex items-center gap-1 text-[#C25E43]">
-                    <Globe className="w-3 h-3" />
-                    <span>Web fallback</span>
-                  </span>
-                </>
+            {/* Artifacts Drawer Toggle Button (Replaces static docs pill) */}
+            <button
+              type="button"
+              onClick={onToggleArtifacts}
+              className={cn(
+                'flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-xs font-medium transition-colors cursor-pointer',
+                isArtifactsOpen
+                  ? 'bg-[#FDF6F3] text-[#C25E43] border-[#F1D6CE] shadow-2xs'
+                  : 'bg-[#FAF8F5] text-stone-700 border-[#E7E2DA] hover:text-stone-900 hover:border-stone-400'
               )}
-            </div>
+              title="View session artifacts & uploaded documents"
+            >
+              <Files className="w-3.5 h-3.5 text-[#C25E43]" />
+              {/* Artifacts icon */}
+              <span className="ml-0.5 px-1.5 py-0.2 rounded-full bg-stone-200/80 text-[10px] font-mono text-stone-700 font-semibold">
+                {documentCount}
+              </span>
+            </button>
 
-            {/* Inspector Toggle Button */}
+            {/* Web fallback indicator if active */}
+            {enableWebSearch && (
+              <div className="hidden md:flex items-center gap-1 px-2 py-1 rounded-lg bg-[#FAF8F5] border border-[#E7E2DA] text-xs font-mono text-[#C25E43]">
+                <Globe className="w-3 h-3" />
+                <span>Web fallback</span>
+              </div>
+            )}
+
+            {/* Inspector Toggle Button (Icon-only professional design) */}
             {onToggleInspector && (
               <button
+                type="button"
                 onClick={onToggleInspector}
                 className={cn(
-                  'flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-xs font-medium transition-colors cursor-pointer',
+                  'flex items-center justify-center p-2 rounded-lg border transition-colors cursor-pointer relative',
                   isInspectorOpen
-                    ? 'bg-[#FDF6F3] text-[#C25E43] border-[#F1D6CE]'
+                    ? 'bg-[#FDF6F3] text-[#C25E43] border-[#F1D6CE] shadow-2xs'
                     : 'bg-white text-stone-600 border-[#E7E2DA] hover:text-stone-900 hover:border-stone-400'
                 )}
-                title="Toggle Execution Inspector"
+                title="Execution Inspector"
+                aria-label="Execution Inspector"
               >
                 <Activity className="w-3.5 h-3.5 text-[#C25E43]" />
-                <span className="hidden sm:inline">Inspector</span>
                 {hasRunMetrics && !isInspectorOpen && (
-                  <span className="w-1.5 h-1.5 rounded-full bg-[#C25E43]" />
+                  <span className="w-1.5 h-1.5 rounded-full bg-[#C25E43] absolute top-1 right-1" />
                 )}
               </button>
             )}

@@ -4,12 +4,14 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   AppNavView,
   ChatMessage,
+  ClientCreditInfo,
   DocumentItem,
   EvidenceItem,
   HealthStatus,
   LocalSessionMeta,
   MemoryItem,
   RunEvent,
+  UploadingAttachment,
   UserSettings,
 } from '../types';
 import {
@@ -19,6 +21,7 @@ import {
   createSession,
   deleteDocument,
   deleteMemory,
+  getClientCredits,
   getRunEvents,
   getSession,
   listDocuments,
@@ -38,6 +41,7 @@ import { Header } from '../components/layout/Header';
 import { MessageList } from '../components/chat/MessageList';
 import { Composer } from '../components/chat/Composer';
 import { ExecutionInspector } from '../components/chat/ExecutionInspector';
+import { ArtifactsDrawer } from '../components/chat/ArtifactsDrawer';
 import { KnowledgeView } from '../components/knowledge/KnowledgeView';
 import { MemoryView } from '../components/memory/MemoryView';
 import { SettingsView } from '../components/settings/SettingsView';
@@ -48,9 +52,13 @@ export default function AppPage() {
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
   const [isInspectorOpen, setIsInspectorOpen] = useState(false);
+  const [isArtifactsOpen, setIsArtifactsOpen] = useState(false);
 
   // User Settings
   const [settings, setSettings] = useState<UserSettings>(getUserSettings());
+
+  // Credits & Quota
+  const [clientCredits, setClientCredits] = useState<ClientCreditInfo | null>(null);
 
   // Health
   const [health, setHealth] = useState<HealthStatus | null>(null);
@@ -69,15 +77,30 @@ export default function AppPage() {
   // Knowledge & Documents
   const [documents, setDocuments] = useState<DocumentItem[]>([]);
   const [isUploadingDoc, setIsUploadingDoc] = useState(false);
+  const [uploadingAttachments, setUploadingAttachments] = useState<UploadingAttachment[]>([]);
 
   // Memories
   const [memories, setMemories] = useState<MemoryItem[]>([]);
 
   // Abort control
   const activeAbortRef = useRef<boolean>(false);
+  const uploadControllersRef = useRef<Map<string, AbortController>>(new Map());
+  const cancelledUploadsRef = useRef<Set<string>>(new Set());
 
   // ---------------------------------------------------------------------------
-  // Initial Boot: Load Sessions & Health
+  // Credits & Quota Management
+  // ---------------------------------------------------------------------------
+  const fetchCredits = useCallback(async () => {
+    try {
+      const credits = await getClientCredits();
+      setClientCredits(credits);
+    } catch (err) {
+      console.warn('Failed to fetch client credits:', err);
+    }
+  }, []);
+
+  // ---------------------------------------------------------------------------
+  // Initial Boot: Load Sessions, Health & Credits
   // ---------------------------------------------------------------------------
   useEffect(() => {
     // 1. Fetch Health
@@ -91,7 +114,10 @@ export default function AppPage() {
         })
       );
 
-    // 2. Load Local Sessions
+    // 2. Fetch Credits
+    fetchCredits();
+
+    // 3. Load Local Sessions
     const stored = getLocalSessions();
     setLocalSessions(stored);
 
@@ -100,7 +126,7 @@ export default function AppPage() {
       setActiveSessionId(mostRecent.id);
       setSessionTitle(mostRecent.title || 'Research Workspace');
     }
-  }, []);
+  }, [fetchCredits]);
 
   // ---------------------------------------------------------------------------
   // Session Change: Fetch Session Turns, Docs & Memories from Backend
@@ -288,6 +314,7 @@ export default function AppPage() {
 
     setChatMessages((prev) => [...prev, userMsg, assistantPlaceholder]);
     setIsStreaming(true);
+    setUploadingAttachments([]);
 
     // Live status progression interval
     const statusSteps = [
@@ -356,6 +383,9 @@ export default function AppPage() {
         prev.map((msg) => (msg.id === assistantMsgId ? completedMsg : msg))
       );
 
+      // Refresh credits after run
+      fetchCredits();
+
       // Update inspector target
       setSelectedInspectorMessage(completedMsg);
       if (settings.showTelemetryByDefault) {
@@ -377,6 +407,7 @@ export default function AppPage() {
     } catch (err: unknown) {
       clearInterval(statusInterval);
       const errMessage = err instanceof Error ? err.message : String(err);
+      fetchCredits();
 
       setChatMessages((prev) =>
         prev.map((msg) =>
@@ -421,6 +452,23 @@ export default function AppPage() {
   const handleOpenInspector = (msg: ChatMessage) => {
     setSelectedInspectorMessage(msg);
     setIsInspectorOpen(true);
+    setIsArtifactsOpen(false);
+  };
+
+  const handleToggleArtifacts = () => {
+    setIsArtifactsOpen((prev) => {
+      const next = !prev;
+      if (next) setIsInspectorOpen(false);
+      return next;
+    });
+  };
+
+  const handleToggleInspector = () => {
+    setIsInspectorOpen((prev) => {
+      const next = !prev;
+      if (next) setIsArtifactsOpen(false);
+      return next;
+    });
   };
 
   // ---------------------------------------------------------------------------
@@ -441,27 +489,102 @@ export default function AppPage() {
       setLocalSessions(getLocalSessions());
     }
 
-    setIsUploadingDoc(true);
-    try {
-      const doc = await uploadDocument(sessId, file);
-      setDocuments((prev) => [doc, ...prev]);
+    const attachmentId = `att-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+    const controller = new AbortController();
+    uploadControllersRef.current.set(attachmentId, controller);
 
-      // Inform user in chat thread if in chat view
+    const newAttachment: UploadingAttachment = {
+      id: attachmentId,
+      file,
+      name: file.name,
+      size: file.size,
+      status: 'uploading',
+    };
+    setUploadingAttachments((prev) => [newAttachment, ...prev]);
+    setIsUploadingDoc(true);
+
+    try {
+      const doc = await uploadDocument(sessId, file, controller.signal);
+
+      // Check if user retracted the attachment while uploading/indexing
+      if (cancelledUploadsRef.current.has(attachmentId)) {
+        cancelledUploadsRef.current.delete(attachmentId);
+        // User changed their mind before upload completed: purge from backend vector db immediately
+        deleteDocument(doc.document_id).catch(() => {});
+        return;
+      }
+
+      setDocuments((prev) => [doc, ...prev]);
+      setUploadingAttachments((prev) =>
+        prev.map((a) =>
+          a.id === attachmentId
+            ? { ...a, status: 'completed', chunkCount: doc.chunk_count, documentId: doc.document_id }
+            : a
+        )
+      );
+
+      // Inform user in chat thread if in chat view (keyed by doc ID so removal cleanly purges it)
       const confirmMsg: ChatMessage = {
-        id: `sys-${Date.now()}`,
+        id: `sys-doc-${doc.document_id}`,
         role: 'assistant',
         content: `Ingested **${doc.name}** into session knowledge. Chunked into **${doc.chunk_count}** vectors. You can now ask questions grounded in this document.`,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       };
       setChatMessages((prev) => [...prev, confirmMsg]);
+    } catch (err: unknown) {
+      if (cancelledUploadsRef.current.has(attachmentId)) {
+        cancelledUploadsRef.current.delete(attachmentId);
+        return;
+      }
+      const errMsg = err instanceof Error ? err.message : String(err);
+      setUploadingAttachments((prev) =>
+        prev.map((a) => (a.id === attachmentId ? { ...a, status: 'error', error: errMsg } : a))
+      );
     } finally {
+      uploadControllersRef.current.delete(attachmentId);
       setIsUploadingDoc(false);
+    }
+  };
+
+  const handleRemoveAttachment = async (id: string) => {
+    // 1. Mark as cancelled to prevent post-completion state updates
+    cancelledUploadsRef.current.add(id);
+
+    // 2. Abort in-flight network request if active
+    if (uploadControllersRef.current.has(id)) {
+      try {
+        uploadControllersRef.current.get(id)?.abort();
+      } catch {}
+      uploadControllersRef.current.delete(id);
+    }
+
+    // 3. Find the attachment item in current uploadingAttachments
+    const target = uploadingAttachments.find((a) => a.id === id);
+
+    // 4. Remove immediately from preview UI
+    setUploadingAttachments((prev) => prev.filter((a) => a.id !== id));
+
+    // 5. If it was already uploaded and indexed into the database/vector store, purge it completely!
+    if (target?.documentId) {
+      const docId = target.documentId;
+      try {
+        // Remove from session documents list (Artifacts drawer & counter)
+        setDocuments((prev) => prev.filter((d) => d.document_id !== docId));
+        // Remove the confirmation message from chat thread
+        setChatMessages((prev) => prev.filter((m) => m.id !== `sys-doc-${docId}`));
+        // Purge chunks from pgvector and document record from backend
+        await deleteDocument(docId);
+      } catch (err) {
+        console.error(`Failed to delete retracted document ${docId}:`, err);
+      }
     }
   };
 
   const handleDeleteDocument = async (documentId: string) => {
     await deleteDocument(documentId);
     setDocuments((prev) => prev.filter((d) => d.document_id !== documentId));
+    setUploadingAttachments((prev) => prev.filter((a) => a.documentId !== documentId));
+    setChatMessages((prev) => prev.filter((m) => m.id !== `sys-doc-${documentId}`));
   };
 
   // ---------------------------------------------------------------------------
@@ -506,8 +629,10 @@ export default function AppPage() {
           currentView={currentView}
           sessionTitle={sessionTitle}
           onUpdateSessionTitle={handleUpdateSessionTitle}
-          onToggleInspector={() => setIsInspectorOpen(!isInspectorOpen)}
+          onToggleInspector={handleToggleInspector}
           isInspectorOpen={isInspectorOpen}
+          onToggleArtifacts={handleToggleArtifacts}
+          isArtifactsOpen={isArtifactsOpen}
           onOpenMobileSidebar={() => setIsMobileSidebarOpen(true)}
           documentCount={documents.length}
           enableWebSearch={settings.enableWebFallback}
@@ -536,6 +661,8 @@ export default function AppPage() {
                   initialQuery={composerInitialQuery}
                   defaultEnableWeb={settings.enableWebFallback}
                   documentCount={documents.length}
+                  uploadingAttachments={uploadingAttachments}
+                  onRemoveAttachment={handleRemoveAttachment}
                 />
               </div>
             )}
@@ -565,8 +692,13 @@ export default function AppPage() {
             {currentView === 'settings' && (
               <SettingsView
                 settings={settings}
-                onUpdateSettings={setSettings}
+                onUpdateSettings={(newSettings) => {
+                  setSettings(newSettings);
+                  fetchCredits();
+                }}
                 onBack={() => setCurrentView('chat')}
+                clientCredits={clientCredits}
+                onRefreshCredits={fetchCredits}
               />
             )}
           </main>
@@ -576,6 +708,18 @@ export default function AppPage() {
             <ExecutionInspector
               message={selectedInspectorMessage || chatMessages.filter((m) => m.role === 'assistant').pop() || null}
               onClose={() => setIsInspectorOpen(false)}
+              clientCredits={clientCredits}
+            />
+          )}
+
+          {/* 4. Optional Right Artifacts Drawer */}
+          {isArtifactsOpen && (
+            <ArtifactsDrawer
+              documents={documents}
+              onClose={() => setIsArtifactsOpen(false)}
+              onUploadDocument={handleUploadDocument}
+              onDeleteDocument={handleDeleteDocument}
+              isUploading={isUploadingDoc}
             />
           )}
         </div>

@@ -130,6 +130,37 @@ export interface LocalSessionMeta {
   previewText?: string;
 }
 
+export interface BYOKSettings {
+  keyMode: 'default' | 'byok';
+  geminiApiKey: string;
+  groqApiKey: string;
+  groqSecondaryApiKey?: string;
+  tavilyApiKey?: string;
+}
+
+export interface ClientCreditInfo {
+  client_id: string;
+  key_mode: 'default' | 'byok';
+  default_spent_usd: number;
+  byok_spent_usd: number;
+  credit_limit_usd: number;
+  remaining_credit_usd: number;
+  is_capped: boolean;
+}
+
+export interface ProviderKeyStatus {
+  valid: boolean;
+  message: string;
+  latency_ms?: number;
+}
+
+export interface TestKeysResponse {
+  gemini?: ProviderKeyStatus;
+  groq?: ProviderKeyStatus;
+  groq_secondary?: ProviderKeyStatus;
+  tavily?: ProviderKeyStatus;
+}
+
 export interface UserSettings {
   apiBaseUrl: string;
   responseMode: 'concise' | 'detailed';
@@ -137,5 +168,17 @@ export interface UserSettings {
   budgets: ExecutionBudgets;
   density: 'comfortable' | 'compact';
   showTelemetryByDefault: boolean;
+  byok: BYOKSettings;
+}
+
+export interface UploadingAttachment {
+  id: string;
+  file: File;
+  name: string;
+  size: number;
+  status: 'uploading' | 'completed' | 'error';
+  chunkCount?: number;
+  documentId?: string;
+  error?: string;
 }
 

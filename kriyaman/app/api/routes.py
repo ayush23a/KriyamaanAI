@@ -1,10 +1,12 @@
 import uuid
 from typing import Annotated
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Header, HTTPException, UploadFile, status
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
+from app.config import Settings, settings
 from app.api.schemas import (
     AnswerResponse,
+    ClientCreditResponse,
     DocumentListResponse,
     DocumentResponse,
     ErrorDetail,
@@ -15,6 +17,7 @@ from app.api.schemas import (
     MemoryCreateRequest,
     MemoryListResponse,
     MemoryResponse,
+    ProviderKeyStatus,
     RunCreateRequest,
     RunEventResponse,
     RunEventsResponse,
@@ -22,6 +25,8 @@ from app.api.schemas import (
     SessionCreateRequest,
     SessionDetailResponse,
     SessionResponse,
+    TestKeysRequest,
+    TestKeysResponse,
     TurnResponse,
 )
 from app.dependencies import (
@@ -31,8 +36,12 @@ from app.dependencies import (
     get_ingestion_service,
     get_llm_provider,
     get_run_service,
+    get_settings,
     get_vector_store,
 )
+from adapters.llm.litellm_gateway import LiteLLMGatewayAdapter
+from adapters.web.adk_search import WebSearchAdapter
+from adapters.web.fallback import MockWebSearchAdapter
 from application.ingestion_service import IngestionService
 from application.run_service import RunExecutionService
 from domain.errors import (
@@ -44,6 +53,7 @@ from domain.errors import (
     ValidationError,
 )
 from persistence.repositories.chunk_repo import DocumentChunkRepository
+from persistence.repositories.credit_repo import ClientCreditRepository
 from persistence.repositories.document_repo import DocumentRepository
 from persistence.repositories.memory_repo import MemoryRepository
 from persistence.repositories.principal_repo import MemoryPrincipalRepository
@@ -104,6 +114,172 @@ async def get_health(
         status=overall_status,
         version="1.0.0",
         dependencies=dep_status,
+    )
+
+
+@router.post(
+    "/health/test-keys",
+    response_model=TestKeysResponse,
+    summary="Test connectivity for Gemini, Groq, and Tavily API keys",
+)
+async def test_api_keys(
+    request: TestKeysRequest,
+) -> TestKeysResponse:
+    import time
+    import httpx
+    import litellm
+
+    response = TestKeysResponse()
+
+    # 1. Test Gemini
+    if request.gemini_api_key and request.gemini_api_key.strip():
+        t0 = time.time()
+        try:
+            await litellm.acompletion(
+                model="gemini/gemini-3.6-flash",
+                messages=[{"role": "user", "content": "ping"}],
+                api_key=request.gemini_api_key.strip(),
+                max_tokens=1,
+                timeout=10.0,
+            )
+            lat = int((time.time() - t0) * 1000)
+            response.gemini = ProviderKeyStatus(
+                valid=True,
+                message="Connected to Gemini 3.6 Flash.",
+                latency_ms=lat,
+            )
+        except Exception as e:
+            lat = int((time.time() - t0) * 1000)
+            err_msg = str(e)
+            if "API_KEY_INVALID" in err_msg or "400" in err_msg or "403" in err_msg:
+                clean_msg = "Invalid or expired Gemini API key."
+            else:
+                clean_msg = f"Gemini connection failed: {err_msg[:120]}"
+            response.gemini = ProviderKeyStatus(
+                valid=False,
+                message=clean_msg,
+                latency_ms=lat,
+            )
+
+    # 2. Test Groq Primary
+    if request.groq_api_key and request.groq_api_key.strip():
+        t0 = time.time()
+        try:
+            await litellm.acompletion(
+                model="groq/qwen/qwen3.8-27b",
+                messages=[{"role": "user", "content": "ping"}],
+                api_key=request.groq_api_key.strip(),
+                max_tokens=1,
+                timeout=10.0,
+            )
+            lat = int((time.time() - t0) * 1000)
+            response.groq = ProviderKeyStatus(
+                valid=True,
+                message="Connected to Groq (Qwen 3.8-27B).",
+                latency_ms=lat,
+            )
+        except Exception as e:
+            lat = int((time.time() - t0) * 1000)
+            err_msg = str(e)
+            if "401" in err_msg or "Invalid API Key" in err_msg:
+                clean_msg = "Invalid Groq API key."
+            elif "rate_limit" in err_msg.lower() or "429" in err_msg:
+                clean_msg = "Groq key valid, but currently rate-limited (TPM limit reached)."
+            else:
+                clean_msg = f"Groq connection failed: {err_msg[:120]}"
+            response.groq = ProviderKeyStatus(
+                valid=False,
+                message=clean_msg,
+                latency_ms=lat,
+            )
+
+    # 3. Test Groq Secondary (if provided)
+    if request.groq_api_key_secondary and request.groq_api_key_secondary.strip():
+        t0 = time.time()
+        try:
+            await litellm.acompletion(
+                model="groq/qwen/qwen3.8-27b",
+                messages=[{"role": "user", "content": "ping"}],
+                api_key=request.groq_api_key_secondary.strip(),
+                max_tokens=1,
+                timeout=10.0,
+            )
+            lat = int((time.time() - t0) * 1000)
+            response.groq_secondary = ProviderKeyStatus(
+                valid=True,
+                message="Connected to secondary Groq key.",
+                latency_ms=lat,
+            )
+        except Exception as e:
+            lat = int((time.time() - t0) * 1000)
+            err_msg = str(e)
+            clean_msg = "Invalid secondary Groq key." if ("401" in err_msg or "Invalid" in err_msg) else f"Groq secondary failed: {err_msg[:120]}"
+            response.groq_secondary = ProviderKeyStatus(
+                valid=False,
+                message=clean_msg,
+                latency_ms=lat,
+            )
+
+    # 4. Test Tavily (if provided)
+    if request.tavily_api_key and request.tavily_api_key.strip():
+        t0 = time.time()
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                tav_res = await client.post(
+                    "https://api.tavily.com/search",
+                    json={"query": "test", "max_results": 1, "api_key": request.tavily_api_key.strip()},
+                )
+                lat = int((time.time() - t0) * 1000)
+                if tav_res.status_code == 200:
+                    response.tavily = ProviderKeyStatus(
+                        valid=True,
+                        message="Connected to Tavily Web Search.",
+                        latency_ms=lat,
+                    )
+                else:
+                    response.tavily = ProviderKeyStatus(
+                        valid=False,
+                        message=f"Tavily returned HTTP {tav_res.status_code} (check API key).",
+                        latency_ms=lat,
+                    )
+        except Exception as e:
+            lat = int((time.time() - t0) * 1000)
+            response.tavily = ProviderKeyStatus(
+                valid=False,
+                message=f"Tavily connection error: {str(e)[:120]}",
+                latency_ms=lat,
+            )
+
+    return response
+
+
+@router.get(
+    "/client/credits",
+    response_model=ClientCreditResponse,
+    summary="Get client cumulative usage and remaining credit",
+)
+async def get_client_credits(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    x_client_id: Annotated[str | None, Header()] = None,
+) -> ClientCreditResponse:
+    client_id = x_client_id or "default_client"
+    credit_repo = ClientCreditRepository(db)
+    record = await credit_repo.get_or_create(client_id)
+    remaining = max(0.0, round(record.credit_limit_usd - record.default_spent_usd, 4))
+    is_capped = (
+        (record.default_spent_usd >= record.credit_limit_usd)
+        if settings.enforce_client_credit_cap
+        else False
+    )
+    return ClientCreditResponse(
+        client_id=record.client_id,
+        key_mode=record.key_mode,
+        default_spent_usd=round(record.default_spent_usd, 4),
+        byok_spent_usd=round(record.byok_spent_usd, 4),
+        credit_limit_usd=record.credit_limit_usd,
+        remaining_credit_usd=remaining,
+        is_capped=is_capped,
     )
 
 
@@ -211,14 +387,78 @@ async def create_run(
     request: RunCreateRequest,
     db: Annotated[AsyncSession, Depends(get_db)],
     run_service: Annotated[RunExecutionService, Depends(get_run_service)],
+    x_client_id: Annotated[str | None, Header()] = None,
+    x_key_mode: Annotated[str | None, Header()] = None,
+    x_gemini_api_key: Annotated[str | None, Header()] = None,
+    x_groq_api_key: Annotated[str | None, Header()] = None,
+    x_groq_secondary_api_key: Annotated[str | None, Header()] = None,
+    x_tavily_api_key: Annotated[str | None, Header()] = None,
 ) -> RunResponse:
+    client_id = x_client_id or session_id
+    credit_repo = ClientCreditRepository(db)
+    is_byok = (x_key_mode or "").lower() == "byok"
+
+    custom_llm = None
+    custom_web = None
+
+    if is_byok:
+        gemini_k = (x_gemini_api_key or "").strip()
+        groq_k = (x_groq_api_key or "").strip()
+        groq_sec_k = (x_groq_secondary_api_key or "").strip()
+        tavily_k = (x_tavily_api_key or "").strip()
+
+        if gemini_k or groq_k:
+            custom_llm = LiteLLMGatewayAdapter(
+                google_api_key=gemini_k,
+                groq_api_key=groq_k,
+                groq_api_key_secondary=groq_sec_k,
+                planner_model=settings.planner_model,
+                judge_model=settings.judge_model,
+                generator_model=settings.generator_model,
+                planner_fallback_models=settings.planner_fallback_models,
+                judge_fallback_models=settings.judge_fallback_models,
+                generator_fallback_models=settings.generator_fallback_models,
+                temperature=settings.llm_temperature,
+                timeout_seconds=settings.llm_timeout_seconds,
+                max_retries=settings.llm_max_retries,
+                retry_backoff=settings.llm_retry_backoff,
+            )
+        if tavily_k or gemini_k:
+            custom_web = WebSearchAdapter(
+                google_api_key=gemini_k,
+                tavily_api_key=tavily_k,
+                model_name="gemini-3.6-flash",
+                offline_fallback=MockWebSearchAdapter(),
+            )
+    else:
+        # Default Mode: Enforce $5.00 limit if enabled
+        if settings.enforce_client_credit_cap:
+            is_allowed, remaining, spent = await credit_repo.check_budget(client_id)
+            if not is_allowed:
+                raise HTTPException(
+                    status_code=status.HTTP_402_PAYMENT_REQUIRED,
+                    detail=(
+                        f"Free platform credit limit of $5.00 USD reached (spent: ${spent:.4f}). "
+                        "Please switch to BYOK (Bring Your Own Key) in Settings -> General & API to continue."
+                    ),
+                )
+
     result = await run_service.execute_run(
         db=db,
         session_id=session_id,
         query=request.query,
         budgets=request.budgets,
         enable_web_search=request.enable_web_search,
+        llm_provider=custom_llm,
+        web_search=custom_web,
     )
+
+    # Record usage in credit repository
+    run_usage = result.get("state", {}).get("usage")
+    if run_usage:
+        cost = float(getattr(run_usage, "estimated_cost_usd", 0.0) or 0.0)
+        await credit_repo.record_usage(client_id, cost, is_byok=is_byok)
+        await db.commit()
 
     run_id = result["run_id"]
     state = result["state"]
@@ -564,4 +804,3 @@ async def delete_memory(
         message=f"Memory '{memory_id}' deleted successfully.",
         id=memory_id,
     )
-

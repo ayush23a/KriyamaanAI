@@ -161,6 +161,7 @@ class GraphNodes:
         plan = self.controller.decide(
             query=state["user_query"],
             normalized_query=state["normalized_query"],
+            session_documents=state.get("session_documents"),
             session_history=[
                 m.content
                 for m in state.get("memory_items", [])
@@ -308,6 +309,7 @@ class GraphNodes:
             prior_assessment=assessment,
             retrieval_iterations=state.get("retrieval_iterations", 0),
             budgets=state["budgets"],
+            session_documents=state.get("session_documents"),
         )
 
         val_result = self.plan_validator.validate(

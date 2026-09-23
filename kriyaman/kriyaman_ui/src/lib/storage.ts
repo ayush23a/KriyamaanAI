@@ -2,6 +2,23 @@ import { LocalSessionMeta, UserSettings } from '../types';
 
 const CONVERSATIONS_KEY = 'kriyaman_local_conversations';
 const SETTINGS_KEY = 'kriyaman_user_settings';
+const CLIENT_ID_KEY = 'kriyaman_client_id';
+
+export function getClientId(): string {
+  if (typeof window === 'undefined') return 'default-client';
+  try {
+    let id = localStorage.getItem(CLIENT_ID_KEY);
+    if (!id) {
+      id = typeof crypto !== 'undefined' && crypto.randomUUID
+        ? crypto.randomUUID()
+        : 'client-' + Math.random().toString(36).substring(2, 15);
+      localStorage.setItem(CLIENT_ID_KEY, id);
+    }
+    return id;
+  } catch {
+    return 'default-client';
+  }
+}
 
 export const DEFAULT_SETTINGS: UserSettings = {
   apiBaseUrl: 'http://localhost:8000/api/v1',
@@ -16,6 +33,13 @@ export const DEFAULT_SETTINGS: UserSettings = {
   },
   density: 'comfortable',
   showTelemetryByDefault: false,
+  byok: {
+    keyMode: 'default',
+    geminiApiKey: '',
+    groqApiKey: '',
+    groqSecondaryApiKey: '',
+    tavilyApiKey: '',
+  },
 };
 
 export function getLocalSessions(): LocalSessionMeta[] {
@@ -123,6 +147,10 @@ export function getUserSettings(): UserSettings {
         ...DEFAULT_SETTINGS.budgets,
         ...(parsed.budgets || {}),
       },
+      byok: {
+        ...DEFAULT_SETTINGS.byok,
+        ...(parsed.byok || {}),
+      },
     };
   } catch {
     return DEFAULT_SETTINGS;
@@ -139,6 +167,10 @@ export function saveUserSettings(partial: Partial<UserSettings>): UserSettings {
       budgets: {
         ...current.budgets,
         ...(partial.budgets || {}),
+      },
+      byok: {
+        ...current.byok,
+        ...(partial.byok || {}),
       },
     };
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(updated));

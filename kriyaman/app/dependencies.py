@@ -9,7 +9,7 @@ from adapters.reranking.baseline import DeterministicBaselineReranker
 from adapters.vectorstores.pgvector import PgVectorStore
 from adapters.web.adk_search import WebSearchAdapter
 from adapters.web.fallback import MockWebSearchAdapter
-from app.config import settings
+from app.config import Settings, settings
 from application.cache_service import CacheService
 from application.chunker import TextChunker
 from application.ingestion_service import IngestionService
@@ -30,6 +30,10 @@ from persistence.db import get_async_session, get_sync_session_factory
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
     async for session in get_async_session():
         yield session
+
+
+def get_settings() -> Settings:
+    return settings
 
 
 # ---------------------------------------------------------------------------
@@ -75,10 +79,13 @@ from adapters.llm.litellm_gateway import LiteLLMGatewayAdapter
 def get_llm_provider() -> LLMProvider | None:
     if not settings.llm_enabled:
         return None
-    if settings.google_api_key or settings.groq_api_key:
+    groq_primary = settings.groq_api_key or settings.groq_api_key_1
+    groq_secondary = settings.groq_api_key_secondary or settings.groq_api_key_2
+    if settings.google_api_key or groq_primary:
         return LiteLLMGatewayAdapter(
             google_api_key=settings.google_api_key,
-            groq_api_key=settings.groq_api_key,
+            groq_api_key=groq_primary,
+            groq_api_key_secondary=groq_secondary,
             planner_model=settings.planner_model,
             judge_model=settings.judge_model,
             generator_model=settings.generator_model,
@@ -128,4 +135,3 @@ def get_run_service() -> RunExecutionService:
         web_search=get_web_search_provider(),
         cache_port=get_cache_adapter(),
     )
-

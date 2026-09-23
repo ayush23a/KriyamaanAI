@@ -27,6 +27,7 @@ from application.graph.builder import create_kriyaman_graph
 from application.graph.nodes import GraphNodes
 from application.graph.state import GraphState
 from application.retrieval_agent import RetrievalAgent
+from persistence.repositories.document_repo import DocumentRepository
 from persistence.repositories.memory_repo import MemoryRepository
 from persistence.repositories.run_repo import RunEventRepository, RunRepository
 from persistence.repositories.session_repo import SessionRepository
@@ -52,18 +53,25 @@ class RunExecutionService:
         self.cache_port = cache_port
         self.checkpointer = checkpointer or PostgresCheckpointSaver()
 
-    def build_graph(self, enable_web_search: bool = False):
+    def build_graph(
+        self,
+        enable_web_search: bool = False,
+        llm_provider: LLMProvider | None = None,
+        web_search: WebSearchProvider | None = None,
+    ):
         """Assemble the compiled Kriyamaan graph using configured providers and checkpointer."""
-        controller = AgentController(llm_provider=self.llm_provider)
-        web_provider = self.web_search if enable_web_search else None
+        active_llm = llm_provider or self.llm_provider
+        controller = AgentController(llm_provider=active_llm)
+        active_web = web_search or self.web_search
+        web_provider = active_web if enable_web_search else None
         retrieval_agent = RetrievalAgent(
             vector_store=self.vector_store,
             reranker=self.reranker,
             web_search=web_provider,
         )
-        evidence_judge = EvidenceJudge(llm_provider=self.llm_provider)
+        evidence_judge = EvidenceJudge(llm_provider=active_llm)
         context_builder = ContextBuilder()
-        answer_service = AnswerService(llm=self.llm_provider) if self.llm_provider else None
+        answer_service = AnswerService(llm=active_llm) if active_llm else None
 
         nodes = GraphNodes(
             controller=controller,
@@ -82,6 +90,8 @@ class RunExecutionService:
         query: str,
         budgets: ExecutionBudgets | None = None,
         enable_web_search: bool = False,
+        llm_provider: LLMProvider | None = None,
+        web_search: WebSearchProvider | None = None,
     ) -> dict[str, Any]:
         session_repo = SessionRepository(db)
         turn_repo = ConversationTurnRepository(db)
@@ -96,10 +106,13 @@ class RunExecutionService:
                 f"Session '{session_id}' not found.", resource_type="session", resource_id=session_id
             )
 
-        # 2. Retrieve session context & memories
+        # 2. Retrieve session context, documents & memories
         principal_id = session.memory_principal_id
         memories = await memory_repo.list_by_principal(principal_id)
         recent_turns = await turn_repo.list_recent_turns(session_id, limit=10)
+        doc_repo = DocumentRepository(db)
+        docs = await doc_repo.list_by_session(session_id)
+        session_documents = [d.name for d in docs if getattr(d, "name", None)]
 
         session_history: list[str] = []
         for t in recent_turns:
@@ -145,7 +158,11 @@ class RunExecutionService:
         )
 
         # 4. Assemble Graph Nodes & Graph
-        graph = self.build_graph(enable_web_search=enable_web_search)
+        graph = self.build_graph(
+            enable_web_search=enable_web_search,
+            llm_provider=llm_provider,
+            web_search=web_search,
+        )
 
         # 5. Initialize State
         normalized_query = re.sub(r"\s+", " ", query.strip())
@@ -169,12 +186,22 @@ class RunExecutionService:
             "context_package": None,
             "answer": None,
             "failure": None,
+            "guardrail_rejected": False,
+            "guardrail_reason_code": None,
+            "session_documents": session_documents,
         }
 
         # 6. Execute Graph
+        active_llm = llm_provider or self.llm_provider
+        if hasattr(active_llm, "reset_cumulative_usage"):
+            active_llm.reset_cumulative_usage()
+
         final_state: GraphState = await asyncio.to_thread(
             graph.invoke, initial_state, {"configurable": {"thread_id": run_id}}
         )
+
+        if hasattr(active_llm, "cumulative_usage") and active_llm.cumulative_usage:
+            final_state["usage"] = active_llm.cumulative_usage
 
         # 7. Persist Events
         for event in final_state.get("execution_events", []):

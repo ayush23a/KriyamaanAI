@@ -3,7 +3,7 @@
 **Status:** Implementation baseline  
 **Audience:** AI coding agents and engineers implementing the rebuild  
 **Primary reference:** `assets/Screenshot_20260917_162445.png`  
-**Scope:** A single-process, backend-first Agentic RAG application with FastAPI, LangGraph, PostgreSQL/pgvector, Redis, Streamlit, Langfuse, and Ragas.
+**Scope:** A single-process, backend-first Agentic RAG application with FastAPI, LangGraph, PostgreSQL/pgvector, Redis, Next.js 16 UI (`kriyaman_ui`), LiteLLM, Langfuse, and Ragas.
 
 **Repository boundary:** All files belonging to the rebuilt application MUST be created and maintained under this `kriyaman/` directory. This includes source code, `requirements.txt`, `.env.example`, configuration, migrations, database-related project files, prompts, tests, evaluation datasets, scripts, documentation, UI, local artifacts, cache/configuration definitions, and any future Docker/deployment files. The existing Python virtual environment is the only exception and may physically exist outside or above `kriyaman/`; all dependencies installed into it MUST be declared by `kriyaman/requirements.txt`. The parent repository's adjacent `backend/`, `data/`, and other legacy directories are reference material only. New code MUST NOT create, modify, import from, depend on, or write application files into them. PostgreSQL and Redis may run as external services, but their client configuration and all project-owned files remain under `kriyaman/`. Do not create a second virtual environment unless explicitly requested.
 
@@ -47,7 +47,7 @@ The first release explicitly does **not** include authentication, authorization/
 
 ```mermaid
 flowchart LR
-    U[User] --> UI[Streamlit thin client]
+    U[User] --> UI[Next.js 16 Web Client / API Client]
     UI --> API[FastAPI application API]
     API --> G[LangGraph runtime]
     G --> C[Agent Controller]
@@ -78,7 +78,19 @@ flowchart LR
 | Component | Owns | Must not own |
 |---|---|---|
 | FastAPI adapter | Request validation, session/run endpoints, streaming event transport | Retrieval or prompt logic |
-| Streamlit client | Query/upload display, citations, structured events, metrics | Provider calls or graph state |
+| Next.js client (`kriyaman_ui`) | Query/upload display, artifacts drawer, execution telemetry, citations, metrics | Provider calls or graph state |
+| LangGraph runtime | Node order, conditional edges, checkpoint/resume | Provider-specific implementation |
+| Agent Controller | Query classification, acquisition plan, refinement, sufficiency/termination decision | Executing retrieval/tools or writing final answer |
+| Retrieval Agent | Execute a controller plan across vector, metadata, hybrid, rerank, web, memory, tools | Choosing an unrequested strategy |
+| VectorStore | Similarity/hybrid search and document chunk persistence | Query planning |
+| Memory store | Session history and explicit long-term memory reads/writes | Inferring unapproved durable memories |
+| Tool Registry | Tool discovery, validation, limits, approval checks, invocation, audit result | Arbitrary code execution or unapproved side effects |
+| Evidence Judge | Assess coverage, quality, conflict, provenance, and sufficiency | Final answer generation |
+| Context Builder | Deterministic prompt/context assembly and budget trimming | Calling retrieval |
+| LLM adapter | Structured controller/judge calls and final answer generation | Retrieval orchestration |
+| LiteLLM gateway | Role-based model routing, retries, timeouts, fallbacks, usage/cost normalization | Authorization, graph routing, evidence policy |
+| Guardrails | Prompt-injection, PII, regex, input/output safety checks | Replacing deterministic policy or silently rewriting unsafe requests |
+| Observability adapter | Best-effort traces/metrics | Application correctness |
 | LangGraph runtime | Node order, conditional edges, checkpoint/resume | Provider-specific implementation |
 | Agent Controller | Query classification, acquisition plan, refinement, sufficiency/termination decision | Executing retrieval/tools or writing final answer |
 | Retrieval Agent | Execute a controller plan across vector, metadata, hybrid, rerank, web, memory, tools | Choosing an unrequested strategy |
@@ -159,7 +171,7 @@ kriyaman/
     metrics.py
     reports/
   main.py
-kriyaman_ui/                  # thin Streamlit client
+kriyaman_ui/                  # Next.js 16 App Router client (React 19, TypeScript, Tailwind CSS)
 tests/
   unit/
   integration/
@@ -451,15 +463,15 @@ class CachePort(Protocol):
 Initial adapters:
 
 - **LLM:** LiteLLM gateway as the production adapter behind `LLMProvider`. Direct provider adapters such as Google Gemini may remain as test/reference adapters, but application code must not import LiteLLM or provider SDKs directly.
-- **LLM role routing:** configure models independently for `planner`, `judge`, and `generator`. The initial recommended routing is Groq `openai/gpt-oss-20b` for planner and judge, Gemini Flash for final generation, Groq `openai/gpt-oss-120b` for escalation or fallback, and a configured alternate Gemini/Groq route for generator fallback. Exact model identifiers and feature support must be verified in the installed LiteLLM/provider versions.
-- **LLM role routing:** configure models independently for `planner`, `judge`, and `generator`. The system routes generation to high-throughput Gemini Flash (`gemini/gemini-3.6-flash`, with `gemini/gemini-3.1-flash-lite` fallback). Planner and Judge roles support Groq (e.g. `llama-3.3-70b-versatile` or `openai/gpt-oss-20b`) with mandatory cross-provider fallback to `gemini/gemini-3.6-flash` and `gemini/gemini-3.1-flash-lite` to ensure the system is never stalled by provider-specific rate limits (such as free-tier 8k TPM ceilings) or schema truncation errors.
+- **LLM role routing:** configure models independently for `planner`, `judge`, and `generator`:
+  - **Generator:** `gemini/gemini-3.6-flash` (primary) with `gemini/gemini-3.1-flash-lite` (fallback). Deprecated models (`gemini-1.5-*`, `gemini-2.5-*`) are strictly avoided.
+  - **Planner & Judge:** Groq models (`groq/qwen/qwen3.8-27b`, `groq/qwen/qwen-2.5-32b`, or `groq/openai/gpt-oss-120b`) with mandatory cross-provider fallback to `gemini/gemini-3.6-flash` and `gemini/gemini-3.1-flash-lite` to guarantee execution resilience against free-tier rate limits (e.g. 8k TPM ceilings) and schema validation truncations.
+  - **Dual API Key / Rate Limiting:** LiteLLM gateway supports dual API key rotation and proactive rate limiting for Groq endpoints to maximize uptime and prevent token exhaustion stalls.
 - **LLM resilience:** the gateway owns bounded retries for idempotent transient failures, timeouts, retry/backoff, provider fallback, structured-output parsing, schema validation, usage normalization, estimated cost, and provider/model metadata. Retry counts and fallback calls must count against run budgets. Side-effecting tools must not be retried automatically unless explicitly idempotent.
 - **Embeddings:** Sentence Transformers/local adapter, with model and dimension recorded in the database.
 - **Vector store:** PostgreSQL pgvector adapter. This is the only vector-store implementation in this rebuild. Keep the `VectorStore` port for dependency inversion and future replacement, but implement only `PgVectorStore`.
 - **Cache:** Redis adapter implementing `CachePort`. Redis is never authoritative and is optional for correctness.
 - **Reranker:** provider port with a deterministic local baseline allowed initially; do not couple retrieval to one vendor.
-- **Web search:** optional adapter selected by configuration; unavailable means a structured capability failure.
-- **Tools:** registry-backed, allowlisted tools only. Initial registry may contain formatting, visualization, file, email, and calendar adapters only when implemented and explicitly enabled. No arbitrary shell/code execution.
 - **Web search:** multi-provider adapter implementing Google Search (via Google ADK) as primary with Tavily as fallback, plus an offline mock adapter when network or keys are unavailable.
 - **Tools:** registry-backed, allowlisted tools only. The tool registry supports formatting tools (e.g. Markdown table formatter, structured data transformer), visualization tools (e.g. chart/graph definition generators, KPI plotters), calculation/reconciliation tools, and search capabilities. No arbitrary shell/code execution.
 
@@ -469,30 +481,23 @@ Create the gateway under `adapters/llm/litellm_gateway.py`; only this adapter ma
 
 The gateway must:
 
-- route planner and judge calls to the configured Groq route by default;
-- route final generation to the configured Gemini Flash route by default;
-- escalate planner/judge calls to `openai/gpt-oss-120b` when configured thresholds indicate malformed output, low confidence, difficult synthesis, or unresolved conflict;
-- fail over across providers/models when a classified transient or capability failure occurs;
-- route planner and judge calls to the configured primary planner route (Groq or Gemini) with automatic cross-provider failover;
-- route final generation to `gemini/gemini-3.6-flash` by default;
+- route planner and judge calls to the configured primary planner route (Groq `qwen/qwen3.8-27b` / `openai/gpt-oss-120b`) with automatic cross-provider failover;
+- route final generation to `gemini/gemini-3.6-flash` by default, with `gemini/gemini-3.1-flash-lite` fallback;
 - escalate planner/judge calls when configured thresholds indicate malformed output, low confidence, difficult synthesis, or unresolved conflict;
 - fail over across providers/models immediately when a classified transient or capability failure occurs (including rate limit 429/TPM errors or schema validation errors);
 - distinguish transient, timeout, rate-limit, validation, capability, budget, and permanent failures;
 - never turn a provider failure into a fabricated or success-shaped answer;
 - expose safe usage, cost, retry, fallback, latency, provider, and model metadata;
-- support structured output validation against the requested Pydantic schema;
+- support structured output validation against the requested Pydantic schema with automated recovery for truncated JSON;
 - preserve request correlation identifiers without logging secrets or raw sensitive content.
 
 Recommended initial routes:
 
 | Logical role | Primary | Escalation/fallback |
 |---|---|---|
-| `planner` | Groq `openai/gpt-oss-20b` | Groq `openai/gpt-oss-120b`, then deterministic safe fallback |
-| `judge` | Groq `openai/gpt-oss-20b` | Groq `openai/gpt-oss-120b`, then conservative deterministic judge |
-| `generator` | Configured Gemini Flash | Groq `openai/gpt-oss-120b` or alternate configured Gemini model, then explicit failure/abstention |
-| `planner` | `gemini/gemini-3.6-flash` or Groq `llama-3.3-70b-versatile` | `gemini/gemini-3.6-flash`, `gemini/gemini-3.1-flash-lite`, then safe heuristic fallback |
-| `judge` | `gemini/gemini-3.6-flash` or Groq `llama-3.3-70b-versatile` | `gemini/gemini-3.6-flash`, `gemini/gemini-3.1-flash-lite`, then conservative deterministic judge |
-| `generator` | `gemini/gemini-3.6-flash` | `gemini/gemini-3.1-flash-lite` or Groq `llama-3.3-70b-versatile`, then explicit failure/abstention |
+| `planner` | Groq `qwen/qwen3.8-27b` (or `openai/gpt-oss-120b`) | `gemini/gemini-3.6-flash`, `gemini/gemini-3.1-flash-lite`, then safe heuristic fallback |
+| `judge` | Groq `qwen/qwen3.8-27b` (or `openai/gpt-oss-120b`) | `gemini/gemini-3.6-flash`, `gemini/gemini-3.1-flash-lite`, then conservative deterministic judge |
+| `generator` | `gemini/gemini-3.6-flash` | `gemini/gemini-3.1-flash-lite` or Groq `qwen/qwen3.8-27b`, then explicit failure/abstention |
 
 The gateway is not an authorization layer. It must not decide whether a tool, source, budget, or output is permitted.
 
@@ -502,6 +507,26 @@ Tool execution policy:
 - side-effect tools such as email, calendar writes, file mutation, or external submissions MUST stop at an approval boundary unless the request carries an explicit, validated approval;
 - approval state, requested arguments, approver/session context, and final tool result must be recorded in structured run events;
 - an unapproved side-effect request is a clarification or refusal outcome, never an automatic execution.
+
+### 6.4 Dual Key Modes & Bring Your Own Key (BYOK) Architecture
+
+To support deployment from local development to hosted staging/production environments with diverse user access tiers, Kriyamaan implements a dual-mode API key architecture:
+
+1. **Default Platform Keys (Managed Trial)**:
+   - Queries use platform credentials configured in the server's environment (`.env` or hosted deployment secrets: `GOOGLE_API_KEY`, `GROQ_API_KEY_1`, `GROQ_API_KEY_2`, `TAVILY_API_KEY`).
+   - Intended for initial trial and evaluation without requiring users to set up provider accounts.
+   - Strictly capped at **$5.00 USD of free credit** per client, tracked via the `client_credits` table.
+
+2. **Bring Your Own Key (BYOK)**:
+   - Users provide their own personal API keys for Google Gemini (`gemini-3.6-flash`), Groq (`qwen/qwen3.8-27b`), secondary Groq key, and Tavily Web Search.
+   - Keys are stored solely in the client browser's `localStorage` and transmitted to the runtime on a per-request basis via custom HTTP headers (`X-Gemini-Api-Key`, `X-Groq-Api-Key`, `X-Groq-Secondary-Api-Key`, `X-Tavily-Api-Key`).
+   - **Zero Persistence of BYOK Secrets**: BYOK credentials are never written to the server database, persistent cache, or disk logs.
+   - **Ephemeral Adapter Instantiation**: When `X-Key-Mode: byok` is specified, the FastAPI runtime instantiates an ephemeral, request-scoped `LiteLLMGatewayAdapter` and `WebSearchAdapter` initialized strictly with the user's header keys, executing the LangGraph pipeline and discarding the adapter immediately upon turn completion.
+   - Queries executed in BYOK mode **bypass the $5.00 platform credit cap for unlimited usage**, while cumulative personal expenditure is calculated and tracked for user financial transparency.
+
+3. **Live Provider Connection Verification**:
+   - The runtime exposes `POST /api/v1/health/test-keys` allowing immediate verification of candidate API keys.
+   - Tests execute live lightweight pings against Google Gemini, Groq, and Tavily, measuring round-trip latency in milliseconds and reporting structured validation status (`valid: bool`, `message: str`, `latency_ms: int`) before keys are activated.
 
 ## 7. Context construction
 
@@ -592,6 +617,7 @@ Use SQLAlchemy models, Alembic migrations, PostgreSQL, and pgvector. The graph c
 | `run_events` | `id`, `run_id`, `sequence`, `event_type`, `payload_json`, timestamp | Structured execution events |
 | `evaluation_runs` | `id`, `dataset_name`, `dataset_version`, `config_json`, `status`, scores_json | Repeatable evaluation metadata |
 | `evaluation_cases` | `id`, `evaluation_run_id`, `case_id`, `input_json`, `output_json`, `scores_json`, `trace_id` | Per-case evaluation results |
+| `client_credits` | `client_id`, `key_mode`, `default_spent_usd`, `byok_spent_usd`, `credit_limit_usd`, timestamps | Client-scoped usage tracking for free platform $5.00 quota and BYOK accounting (Migration 003) |
 
 Requirements:
 
@@ -652,9 +678,18 @@ FastAPI is the authoritative application boundary. Pydantic request/response mod
 | `DELETE` | `/api/v1/documents/{document_id}` | Delete document, chunks, and associated search data |
 | `POST` | `/api/v1/sessions/{session_id}/memories` | Explicitly save a long-term memory |
 | `DELETE` | `/api/v1/memories/{memory_id}` | Delete an explicit memory |
+| `GET` | `/api/v1/client/credits` | Client cumulative usage, remaining free trial credit, and cap status |
+| `POST` | `/api/v1/health/test-keys` | Live latency and validity verification for Gemini, Groq, and Tavily API keys |
 
-`POST /runs` request must include `query` and may include `budgets`, `response_mode`, and `enable_web_search`. It returns `run_id`, initial status, and a polling/event URL. Streaming is optional in the first implementation, but the event model must support it so Streamlit does not depend on internal Python objects.
-`POST /runs` request must include `query` and may include `budgets`, `response_mode`, and `enable_web_search`. It returns `run_id`, initial status, and a polling/event URL. Streaming is supported in the event model so clients do not depend on internal Python objects.
+`POST /runs` request must include `query` and may include `budgets`, `response_mode`, and `enable_web_search`. It returns `run_id`, initial status, and a polling/event URL. Streaming is supported in the event model so client applications do not depend on internal Python objects.
+
+Request headers supporting client identification and BYOK execution:
+- `X-Client-Id`: Persistent UUID identifying the client session/browser profile for credit accounting.
+- `X-Key-Mode`: Operation mode (`"default"` to use platform server keys, or `"byok"` to use client-supplied keys).
+- `X-Gemini-Api-Key`: Optional BYOK Google Gemini API key.
+- `X-Groq-Api-Key`: Optional BYOK primary Groq API key (`qwen/qwen3.8-27b`).
+- `X-Groq-Secondary-Api-Key`: Optional BYOK secondary Groq API key for rate-limit failover.
+- `X-Tavily-Api-Key`: Optional BYOK Tavily Search API key for web fallback.
 
 ### 9.1 Dynamic on-the-go document ingestion lifecycle
 
@@ -666,6 +701,7 @@ The document ingestion endpoint (`POST /api/v1/sessions/{session_id}/documents`)
    - local Sentence Transformer embedding computation;
    - transactional upsert into `documents` and `document_chunks` with pgvector embeddings scoped by `session_id`.
 3. Newly uploaded documents are searchable immediately on the very next query run. Subsequent questions can compare, reconcile, and synthesize evidence across all files in that session with exact document and chunk citation provenance.
+4. **Retraction & Immediate Vector Store Purge**: If a user uploads a document but removes the attachment preview chip in the chat box before submitting the query, the client immediately aborts any in-flight parsing/indexing and issues `DELETE /api/v1/documents/{document_id}`. The backend immediately purges the document metadata and all corresponding chunks with their pgvector embeddings from PostgreSQL, ensuring that retracted files do not consume storage or contaminate vector retrieval results.
 
 ### 9.2 Conversational multi-turn session lifecycle
 
@@ -674,6 +710,42 @@ Each session maintains an ordered sequence of conversation turns (`conversation_
 2. The Agent Controller interprets ambiguous or pronoun-heavy follow-up questions within the context of recent turns.
 3. The generation LLM receives prior turns in the context package, enabling natural multi-turn dialogue (similar to the Gemini app document chat experience).
 4. Answers specify `needs_follow_up: True` whenever an inquiry suggests logical next steps, deeper drill-downs, or requires user input.
+
+### 9.3 Next.js 16 Web Client (`kriyaman_ui`) Architecture
+
+The production user interface is a dedicated Next.js 16 (App Router, React 19, TypeScript, Tailwind CSS) web application communicating exclusively via HTTP and Server-Sent Events with the FastAPI `/api/v1` backend:
+
+1. **Interactive Session Artifacts Drawer**:
+   - Toggled via the top-right header `Artifacts` button.
+   - Strictly renders documents in a clean 2-column grid (`grid-cols-2`), with file type badges (PDF, DOCX, TXT), truncated names, chunk counts, ready/indexed status indicators, and delete actions.
+2. **Synchronized Execution Inspector**:
+   - Toggled via the top-right header `Activity` waveform icon button.
+   - Sized identically to the Artifacts drawer (`sm:w-[380px] lg:w-[400px]`) for design consistency.
+   - Displays real-time run telemetry: step timing breakdown, evidence and cited chunks, budget consumption meter, and token/cost tracking.
+3. **Chat Composer Attachment Preview & Lifecycle**:
+   - Inline preview chips directly above the query input box (matching Gemini/Claude/ChatGPT UX).
+   - Shows file-type icons, filenames, formatted file sizes, and animated indexing spinners.
+   - Renders green `Indexed` checkmarks upon successful chunking.
+   - Dismissing an attachment (`X`) triggers immediate backend purging of document records and pgvector chunks, preventing unwanted context contamination.
+   - Query submission consumes preview attachments into active session knowledge.
+
+### 9.4 BYOK & Client Credit Tracking UI Specification
+
+The web client provides unified configuration and accounting for both default and BYOK key modes:
+
+1. **Settings View (`General & API` Tab)**:
+   - **Mode Selection**: Allows toggling between **Default Platform Keys (Managed Trial)** and **Bring Your Own Key (BYOK)**.
+   - **Live Balance / Expenditure Card**:
+     - *Default Mode*: Progress meter displaying `$X.XX / $5.00 USD Free Credit Used`, remaining balance, and warning states when nearing exhaustion. Displays alert guidance when capped.
+     - *BYOK Mode*: Displays badge indicating **Unlimited Quota** alongside cumulative personal expenditure tracked across runs (`$X.XX USD personal spend`).
+     - Includes a manual **Refresh** button calling `GET /api/v1/client/credits`.
+   - **Provider Credentials Form**: Inputs for Google Gemini, Groq Primary (`qwen/qwen3.8-27b`), Groq Secondary, and Tavily API keys with password visibility toggles (`Eye` / `EyeOff`). Stored only in `localStorage`.
+   - **Interactive Connection Testing**: Individual "Test" buttons next to each field execute `POST /api/v1/health/test-keys`, rendering green badges with measured latency (e.g. `Valid (194ms)`) or red error explanations. A bulk "Test All Connections" button verifies all configured keys in parallel.
+2. **Execution Inspector (`Telemetry` Tab)**:
+   - Features a dedicated **Credit & Balance Overview** card.
+   - For Default Mode: displays cumulative expenditure towards the $5.00 quota and remaining balance with visual progress bar.
+   - For BYOK Mode: indicates `UNLIMITED` status and tracks personal run cost.
+   - Automatically refreshes immediately after each completed query run.
 
 Errors use a stable envelope:
 
@@ -716,6 +788,26 @@ Rules:
 - sanitize uploaded filenames and enforce size/type limits;
 - tool arguments are schema-validated and allowlisted;
 - redact secrets and sensitive prompt content from logs/traces where configured.
+
+### 10.1 Free Trial Quota, Credit Enforcement & Environment Routing (Localhost vs Hosted)
+
+To balance frictionless evaluation for new users with robust financial protection for the platform owner, execution budgets include client-scoped credit management:
+
+1. **Default Platform Trial Limit ($5.00 USD)**:
+   - For clients operating in Default Mode, Kriyamaan provides a complimentary free-trial quota of **$5.00 USD** per client ID.
+   - Every completed query turn accumulates exact token expenditures (computed via LiteLLM or fallback token rates: $0.15/1M prompt, $0.60/1M completion tokens).
+   - Once cumulative spend reaches $5.00 (`is_capped: True`), subsequent query dispatches in Default Mode are rejected with `HTTP 402 Payment Required`, advising the user to configure their own API keys in Settings.
+2. **BYOK Personal Expenditure Accounting**:
+   - Queries executed in BYOK mode (`X-Key-Mode: byok`) bypass the $5.00 platform limit completely, supporting unlimited querying.
+   - The cost of each BYOK run is calculated and persisted to `byok_spent_usd` so that users can audit their estimated API spend in real time via the UI.
+3. **Environment Routing (Localhost vs Hosted Staging/Production)**:
+   - **Localhost Development (Repo Owner)**:
+     - All local terminal commands, scripts, unit tests, and local API requests read credentials directly from the root `.env` (`GOOGLE_API_KEY`, `GROQ_API_KEY_1`, `GROQ_API_KEY_2`, `TAVILY_API_KEY`).
+     - Setting `ENFORCE_CLIENT_CREDIT_CAP=false` in `.env` disables the $5.00 cap entirely on the local development machine, providing the owner with unlimited querying and testing capability.
+   - **Hosted Staging & Production**:
+     - The hosted backend runs with platform environment secrets and `ENFORCE_CLIENT_CREDIT_CAP=true`.
+     - External users trying out the application in Default Mode are strictly constrained to the $5.00 trial envelope, shielding owner accounts from runaway billing while permitting full multi-turn RAG evaluations.
+     - Users requiring extended usage transition seamlessly to BYOK Mode via the UI without service interruption.
 
 LLM gateway configuration must be externalized, typed, and kept under `kriyaman/`:
 
@@ -957,16 +1049,21 @@ These tests are added in the evaluation phase. Run a small pinned smoke dataset 
 
 **Exit:** API returns answer/clarification/abstention with valid citations and no retrieval logic inside generation.
 
-### Phase 5: API and Streamlit client (core runtime completion)
+### Phase 5: API, BYOK Architecture and Next.js 16 Client (`kriyaman_ui`) (Core Runtime Completion)
 
-- Implement versioned FastAPI endpoints and event replay/streaming contract.
+- Implement versioned FastAPI endpoints, event replay/streaming contract, and client credit endpoints (`/client/credits`, `/health/test-keys`).
 - Replace direct frontend/backend object coupling with API calls.
-- Build the minimal Streamlit UI for query, upload, answer, citations, structured events, and metrics.
-- Keep UI replaceable; no business logic in Streamlit.
+- Build the Next.js 16 web application (`kriyaman_ui`) with multi-turn chat, interactive Artifacts drawer (2-col grid), Execution Inspector drawer, real-time attachment previews, and immediate vector store purge on retraction.
+- Implement BYOK (Bring Your Own Key) architecture: support default platform trial keys and user-supplied keys stored in browser `localStorage`, passed securely via request headers.
+- Implement ephemeral LLM/WebSearch adapter generation on per-request basis with zero server credential persistence.
+- Enforce $5.00 USD free platform trial credit limit with `HTTP 402 Payment Required` blocking, backed by PostgreSQL `client_credits` table.
+- Implement `ENFORCE_CLIENT_CREDIT_CAP` flag to provide unlimited usage during local development while strictly guarding hosted staging/production billing.
+- Surface live credit meters and personal expenditure tracking inside Settings View (`General & API`) and Execution Inspector (`Telemetry` tab).
+- Keep UI decoupled from backend orchestration logic; communicate exclusively via `/api/v1` REST & SSE contracts.
 - Add mandatory input/evidence/output guardrail boundaries: prompt-injection detection, PII middleware, and regex matching.
-- Add bounded LiteLLM retries, timeouts, provider/model fallbacks, and safe usage/cost metadata.
+- Add bounded LiteLLM retries, timeouts, provider/model fallbacks, rate limiting, and safe usage/cost metadata.
 
-**Exit:** E2E tests exercise the public API and thin UI behavior.
+**Exit:** E2E and integration tests exercise public API and UI contracts.
 
 At the end of Phases 1–5, run the core sanity/smoke-test milestone before implementing the complete observability or evaluation subsystems. The smoke suite must verify:
 
@@ -1053,3 +1150,96 @@ The rebuild is complete only when:
 9. legacy code is either isolated, replaced, or explicitly marked for deletion;
 10. no deployment configuration was changed;
 11. the existing venv and current Python version remain the implementation baseline unless a documented exception is approved.
+
+## 17. Staging Definition of Done
+
+This section is the release gate for a limited-user staging deployment. A
+claim of completion requires executable evidence for every item below; a
+passing unit suite alone is insufficient.
+
+### 17.1 Repository and architecture
+
+- [ ] All active backend and frontend code is under this repository boundary;
+  no imports, file writes, runtime paths, or tests depend on legacy
+  `backend/`, `data/`, old `frontend/`, `agents/`, `services/`, or legacy
+  `api.py` surfaces.
+- [ ] `kriyaman_ui/` is the only active UI and uses Next.js 16, React 19,
+  TypeScript, and the documented FastAPI REST/SSE contract.
+- [ ] Secrets, BYOK values, PII fixtures, databases, caches, `node_modules`,
+  `.next`, build output, and generated type artifacts are ignored.
+- [ ] `AGENTS.md`, this specification, setup instructions, migration notes,
+  staging environment variables, known limitations, and rollback instructions
+  are current.
+
+### 17.2 Backend correctness
+
+- [ ] The application imports and compiles with the existing repository venv.
+- [ ] Clean-database and upgrade-path Alembic migrations complete
+  successfully, including LangGraph checkpoints and client credits.
+- [ ] Sessions, turns, documents, chunks, memories, runs, events, artifacts,
+  usage, and credit records persist with foreign keys, indexes, and safe
+  transaction boundaries.
+- [ ] Document upload, parsing, chunking, embedding, metadata filtering,
+  pgvector retrieval, reranking, provenance, preview metadata, retraction,
+  and immediate vector-store purge work end to end.
+- [ ] Agentic graph tests cover planner/judge/generator roles, iterative
+  retrieval, follow-up turns, clarification, abstention, conflicting
+  evidence, budgets, checkpoint/resume, and strict generation gating.
+- [ ] Guardrails cover user input, uploaded/evidence content, tool
+  arguments/results, provider output, citations, traces, and persisted
+  responses according to policy.
+
+### 17.3 BYOK, credits, and privacy
+
+- [ ] Platform-key runs enforce the configured client credit cap and return a
+  clear `402` response when exhausted.
+- [ ] BYOK runs require valid request-scoped credentials, bypass only the
+  platform trial cap as specified, and record personal estimated spend.
+- [ ] Credit checks and usage writes are atomic and idempotent enough to
+  prevent concurrent overspend.
+- [ ] BYOK secrets never enter PostgreSQL, Redis, browser server state,
+  Langfuse metadata, application logs, error payloads, or persisted graph
+  checkpoints.
+- [ ] Provider usage/cost normalization is tested for success, retry,
+  fallback, malformed usage, and provider failure paths.
+
+### 17.4 Frontend and conversational UX
+
+- [ ] Next.js lint/type-check and production build pass.
+- [ ] A user can create/select a session, upload documents, preview artifacts,
+  submit a query, inspect evidence/citations/events/usage, and continue with
+  follow-up questions without re-uploading unchanged documents.
+- [ ] Attachment retraction aborts or prevents indexing and purges any
+  already-created document/chunk/vector records.
+- [ ] Settings expose platform/BYOK mode, key validation, credit balance,
+  personal spend, and safe error states without displaying secrets.
+- [ ] UI handles loading, SSE disconnect, provider failure, credit exhaustion,
+  guardrail rejection, empty evidence, conflicting evidence, and stale
+  sessions without silent success.
+
+### 17.5 Observability and evaluation
+
+- [ ] Langfuse traces cover the full run and controller, retrieval, reranking,
+  judge, tool, context, and generation spans when enabled.
+- [ ] Langfuse outages and disabled configuration do not change API outcomes.
+- [ ] Repeatable evaluation fixtures and runners cover Ragas faithfulness,
+  answer relevancy, context precision, context recall, plus retrieval
+  efficiency, unnecessary iterations, premature stopping, tool efficiency,
+  abstention quality, and provenance correctness.
+- [ ] Evaluation and trace identifiers can be correlated for regression
+  diagnosis, with no sensitive prompt/key leakage.
+
+### 17.6 Staging smoke and operations
+
+- [ ] A redacted end-to-end smoke run passes against a staging-like
+  PostgreSQL/pgvector and Redis configuration.
+- [ ] Health/readiness checks identify database, migrations, embeddings, LLM
+  configuration, and optional integrations without exposing secrets.
+- [ ] Staging settings use strict credit enforcement, bounded budgets,
+  production-safe CORS, disabled raw prompt tracing, and explicit provider
+  timeouts.
+- [ ] A rollback procedure identifies the prior application revision and
+  reversible migration strategy; no irreversible data operation is performed
+  without backup/operator approval.
+- [ ] Test commands, results, residual risks, and known non-goals are recorded
+  in the final engineering handoff.

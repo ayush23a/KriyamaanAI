@@ -3,6 +3,7 @@ import uuid
 from sqlalchemy import (
     Boolean,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -295,5 +296,19 @@ class LangGraphWriteModel(Base):
     type: Mapped[str] = mapped_column(String(64), nullable=False)
     value_data: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     task_path: Mapped[str] = mapped_column(String(256), default="", nullable=False)
+
+
+class ClientCreditModel(Base):
+    __tablename__ = "client_credits"
+
+    client_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    key_mode: Mapped[str] = mapped_column(String(32), default="default", nullable=False)
+    default_spent_usd: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    byok_spent_usd: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    credit_limit_usd: Mapped[float] = mapped_column(Float, default=5.0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
 
 

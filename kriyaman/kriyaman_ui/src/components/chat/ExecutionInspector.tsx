@@ -15,16 +15,17 @@ import {
   AlertCircle,
   Zap,
 } from 'lucide-react';
-import { ChatMessage, RunEvent } from '../../types';
+import { ChatMessage, ClientCreditInfo, RunEvent } from '../../types';
 import { getRunEvents } from '../../lib/api';
-import { formatCost, formatLatency, formatTokens } from '../../lib/utils';
+import { cn, formatCost, formatLatency, formatTokens } from '../../lib/utils';
 
 interface ExecutionInspectorProps {
   message: ChatMessage | null;
   onClose: () => void;
+  clientCredits?: ClientCreditInfo | null;
 }
 
-export const ExecutionInspector: React.FC<ExecutionInspectorProps> = ({ message, onClose }) => {
+export const ExecutionInspector: React.FC<ExecutionInspectorProps> = ({ message, onClose, clientCredits }) => {
   const [activeTab, setActiveTab] = useState<'metrics' | 'events' | 'assessment'>('metrics');
   const [events, setEvents] = useState<RunEvent[]>([]);
   const [loadingEvents, setLoadingEvents] = useState(false);
@@ -125,6 +126,83 @@ export const ExecutionInspector: React.FC<ExecutionInspectorProps> = ({ message,
                 </div>
               )}
             </div>
+
+            {/* Credit & Balance Overview */}
+            {clientCredits && (
+              <div className="rounded-xl border border-[#E7E2DA] bg-white p-3.5 shadow-2xs space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-1.5 font-medium text-stone-800">
+                    <Coins className="w-3.5 h-3.5 text-[#C07D32]" />
+                    <span>{clientCredits.key_mode === 'byok' ? 'BYOK Credit Status' : 'Platform Free Credit'}</span>
+                  </div>
+                  <span
+                    className={cn(
+                      'px-2 py-0.5 rounded text-[10px] font-mono font-medium',
+                      clientCredits.key_mode === 'byok'
+                        ? 'bg-[#F4F6F0] text-[#5F7143] border border-[#DCE4D0]'
+                        : clientCredits.is_capped
+                        ? 'bg-red-50 text-red-700 border border-red-200'
+                        : 'bg-[#FDF6F3] text-[#C25E43] border border-[#F1D6CE]'
+                    )}
+                  >
+                    {clientCredits.key_mode === 'byok'
+                      ? 'UNLIMITED'
+                      : clientCredits.is_capped
+                      ? 'CAPPED'
+                      : `$${clientCredits.remaining_credit_usd.toFixed(2)} LEFT`}
+                  </span>
+                </div>
+
+                {clientCredits.key_mode === 'default' ? (
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between text-[11px]">
+                      <span className="text-stone-500">Cumulative Spend</span>
+                      <span className="font-mono font-semibold text-stone-900">
+                        ${clientCredits.default_spent_usd.toFixed(4)} / ${clientCredits.credit_limit_usd.toFixed(2)} USD
+                      </span>
+                    </div>
+                    <div className="w-full bg-[#F2EDE4] h-1.5 rounded-full overflow-hidden">
+                      <div
+                        className={cn(
+                          'h-full rounded-full transition-all duration-300',
+                          clientCredits.is_capped ? 'bg-red-500' : 'bg-[#C25E43]'
+                        )}
+                        style={{
+                          width: `${Math.min(
+                            100,
+                            Math.max(
+                              3,
+                              (clientCredits.default_spent_usd / clientCredits.credit_limit_usd) * 100
+                            )
+                          )}%`,
+                        }}
+                      />
+                    </div>
+                    {clientCredits.is_capped ? (
+                      <p className="text-[10px] text-red-600 font-medium">
+                        $5.00 limit reached. Switch to BYOK in Settings to continue.
+                      </p>
+                    ) : (
+                      <p className="text-[10px] text-stone-400">
+                        Tracks usage towards your $5.00 free evaluation credit.
+                      </p>
+                    )}
+                  </div>
+                ) : (
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between text-[11px]">
+                      <span className="text-stone-500">Personal Spend Tracked</span>
+                      <span className="font-mono font-semibold text-stone-900">
+                        ${clientCredits.byok_spent_usd.toFixed(4)} USD
+                      </span>
+                    </div>
+                    <p className="text-[10px] text-stone-400">
+                      Billed to your provider keys; personal expenditure tracked for transparency.
+                    </p>
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Performance Grid */}
             <div className="grid grid-cols-2 gap-2.5">

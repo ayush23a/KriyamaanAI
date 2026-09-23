@@ -1,4 +1,5 @@
 import {
+  ClientCreditInfo,
   DocumentItem,
   ExecutionBudgets,
   HealthStatus,
@@ -7,7 +8,9 @@ import {
   RunResponse,
   Session,
   SessionDetail,
+  TestKeysResponse,
 } from '../types';
+import { getClientId, getUserSettings } from './storage';
 
 export function getApiBaseUrl(): string {
   if (typeof window !== 'undefined') {
@@ -30,6 +33,23 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
   const headers = new Headers(options.headers || {});
   if (!headers.has('Accept')) {
     headers.set('Accept', 'application/json');
+  }
+
+  // Inject Client ID and BYOK headers if available in browser
+  if (typeof window !== 'undefined') {
+    const clientId = getClientId();
+    headers.set('X-Client-Id', clientId);
+
+    const settings = getUserSettings();
+    if (settings.byok) {
+      headers.set('X-Key-Mode', settings.byok.keyMode || 'default');
+      if (settings.byok.keyMode === 'byok') {
+        if (settings.byok.geminiApiKey) headers.set('X-Gemini-Api-Key', settings.byok.geminiApiKey.trim());
+        if (settings.byok.groqApiKey) headers.set('X-Groq-Api-Key', settings.byok.groqApiKey.trim());
+        if (settings.byok.groqSecondaryApiKey) headers.set('X-Groq-Secondary-Api-Key', settings.byok.groqSecondaryApiKey.trim());
+        if (settings.byok.tavilyApiKey) headers.set('X-Tavily-Api-Key', settings.byok.tavilyApiKey.trim());
+      }
+    }
   }
 
   const response = await fetch(url, {
@@ -112,7 +132,7 @@ export async function getRunEvents(runId: string): Promise<RunEvent[]> {
 // ---------------------------------------------------------------------------
 // Documents (Session Knowledge)
 // ---------------------------------------------------------------------------
-export async function uploadDocument(sessionId: string, file: File): Promise<DocumentItem> {
+export async function uploadDocument(sessionId: string, file: File, signal?: AbortSignal): Promise<DocumentItem> {
   const baseUrl = getApiBaseUrl();
   const url = `${baseUrl}/sessions/${encodeURIComponent(sessionId)}/documents`;
 
@@ -122,6 +142,7 @@ export async function uploadDocument(sessionId: string, file: File): Promise<Doc
   const response = await fetch(url, {
     method: 'POST',
     body: formData,
+    signal,
   });
 
   if (!response.ok) {
@@ -173,4 +194,27 @@ export async function deleteMemory(memoryId: string): Promise<{ success: boolean
     method: 'DELETE',
   });
 }
+
+// ---------------------------------------------------------------------------
+// Credits & BYOK Key Verification
+// ---------------------------------------------------------------------------
+export async function getClientCredits(): Promise<ClientCreditInfo> {
+  return request<ClientCreditInfo>('/client/credits');
+}
+
+export interface TestKeysPayload {
+  gemini_api_key?: string;
+  groq_api_key?: string;
+  groq_api_key_secondary?: string;
+  tavily_api_key?: string;
+}
+
+export async function testApiKeys(payload: TestKeysPayload): Promise<TestKeysResponse> {
+  return request<TestKeysResponse>('/health/test-keys', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+}
+
 

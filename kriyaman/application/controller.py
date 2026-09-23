@@ -16,7 +16,7 @@ from domain.ports.tools import ToolRegistry
 from application.evidence_judge import STOPWORDS, detect_query_intent
 
 CONTROLLER_SYSTEM_PROMPT = """You are the Agent Controller for Kriyamaan Agentic RAG.
-Your task is to plan the next information acquisition action based on the user query, current evidence, and execution budgets.
+Your task is to plan the next information acquisition action based on the user query, uploaded documents, conversation history, current evidence, and execution budgets.
 
 Actions available:
 - 'vector_search': search internal document vector store. (DEFAULT for questions about documents, files, ledgers, statements, or domain topics).
@@ -30,8 +30,13 @@ Actions available:
 
 Decision Rules:
 1. Always prefer 'vector_search' or 'hybrid_search' for questions referencing uploaded documents, files, accounts, ledgers, or business statements.
-2. Even if a query asks to cross-reference multiple sources or mentions using the web, begin information acquisition by searching the internal vector store ('vector_search').
-3. Never choose 'clarify' when the user provides specific domain or file references (e.g. General Ledger, Undeposited Funds, Bank Statement, COA).
+2. If session documents are present and the user asks general, summary, or follow-up questions referencing 'this document', 'this file', 'it', 'what is this about', or 'what does this convey':
+   - ALWAYS choose 'vector_search'.
+   - REWRITE the retrieval query into a targeted semantic search query matching the document's core content, overview, and responsibilities (e.g. including the document title or key terms like 'overview summary role responsibilities qualifications requirements').
+   - NEVER choose 'clarify' when session documents are available.
+3. Even if a query asks to cross-reference multiple sources or mentions using the web, begin information acquisition by searching the internal vector store ('vector_search').
+4. Never choose 'clarify' when the user provides specific domain or file references (e.g. General Ledger, Undeposited Funds, Bank Statement, COA).
+5. Only choose 'clarify' if the query is truly indecipherable gibberish with no relevance to session documents or conversation.
 
 Return structured AcquisitionPlan."""
 
@@ -61,6 +66,7 @@ class AgentController:
         self,
         query: str,
         normalized_query: str,
+        session_documents: list[str] | None = None,
         session_history: list[str] | None = None,
         memory_items: list[MemoryItem] | None = None,
         prior_assessment: EvidenceAssessment | None = None,
@@ -107,15 +113,19 @@ class AgentController:
 
         # 3. If LLM provider is available, use structured generation
         if self.llm_provider is not None:
+            doc_context = f"Uploaded Session Documents: {', '.join(session_documents)}" if session_documents else "Uploaded Session Documents: None"
+            history_context = "\nRecent Conversation Turns:\n" + "\n".join(session_history[-4:]) if session_history else ""
             messages = [
                 ChatMessage(role="system", content=CONTROLLER_SYSTEM_PROMPT),
                 ChatMessage(
                     role="user",
                     content=(
                         f"Query: {normalized_query}\n"
+                        f"{doc_context}\n"
+                        f"{history_context}\n"
                         f"Prior Assessment: {prior_assessment.model_dump_json() if prior_assessment else 'None'}\n"
                         f"Available Tools: {available_tools or []}\n"
-                        "Choose the best AcquisitionPlan."
+                        "Choose the best AcquisitionPlan. If referencing an uploaded document, formulate a topical vector_search query."
                     ),
                 ),
             ]
@@ -131,9 +141,13 @@ class AgentController:
                 pass  # Fallback to default first-pass vector search
 
         # 4. Default fallback: internal vector search on normalized query
+        fallback_query = normalized_query
+        if session_documents and any(w in lower_q for w in ["what is this", "what does this", "about this", "summary", "overview", "this document", "this file", "convey", "tell us"]):
+            fallback_query = f"{session_documents[0]} overview summary key details"
+
         return AcquisitionPlan(
             action="vector_search",
-            query=normalized_query,
+            query=fallback_query,
             top_k=5,
             rerank=True,
             reason_code="first_pass_vector_search",
@@ -146,6 +160,7 @@ class AgentController:
         prior_assessment: EvidenceAssessment,
         retrieval_iterations: int,
         budgets: ExecutionBudgets,
+        session_documents: list[str] | None = None,
     ) -> AcquisitionPlan:
         """Refine the acquisition plan when evidence is insufficient or conflicting."""
         if retrieval_iterations >= budgets.max_retrieval_iterations:
@@ -157,12 +172,14 @@ class AgentController:
             )
 
         if self.llm_provider is not None:
+            doc_context = f"Uploaded Session Documents: {', '.join(session_documents)}" if session_documents else ""
             messages = [
                 ChatMessage(role="system", content=CONTROLLER_SYSTEM_PROMPT),
                 ChatMessage(
                     role="user",
                     content=(
                         f"Original Query: {query}\n"
+                        f"{doc_context}\n"
                         f"Prior Assessment: {prior_assessment.model_dump_json()}\n"
                         f"Current Retrieval Iterations: {retrieval_iterations}/{budgets.max_retrieval_iterations}\n"
                         "The prior evidence was insufficient or conflicting. Produce a refined AcquisitionPlan with a specific search query or action to address the missing aspects."
@@ -181,8 +198,9 @@ class AgentController:
                 pass  # Fallback to heuristic refinement
 
         intent = detect_query_intent(query)
+        doc_prefix = f"{session_documents[0]} " if session_documents else ""
         if intent == "summary":
-            refined_query = "document summary main findings key points"
+            refined_query = f"{doc_prefix}document summary main findings key points"
         elif intent == "advantages":
             refined_query = "system strengths benefits advantages positive findings"
         elif intent == "limitations":

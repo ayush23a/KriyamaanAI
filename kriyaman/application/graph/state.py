@@ -36,4 +36,5 @@ class GraphState(TypedDict):
     failure: FailureInfo | None
     guardrail_rejected: bool
     guardrail_reason_code: str | None
+    session_documents: list[str] | None
 
