@@ -9,6 +9,7 @@ from domain.models import (
     ExecutionEvent,
     FailureInfo,
     MemoryItem,
+    PlanHistoryEntry,
     ToolResult,
     UsageSnapshot,
 )
@@ -21,7 +22,7 @@ class GraphState(TypedDict):
     normalized_query: str
     status: Literal["running", "clarification", "answer", "abstention", "conflicting", "failed"]
     controller_plan: AcquisitionPlan | None
-    plan_history: list[AcquisitionPlan]
+    plan_history: list[PlanHistoryEntry]
     evidence: list[EvidenceItem]
     evidence_assessment: EvidenceAssessment | None
     memory_items: list[MemoryItem]
@@ -36,4 +37,6 @@ class GraphState(TypedDict):
     failure: FailureInfo | None
     guardrail_rejected: bool
     guardrail_reason_code: str | None
+    session_documents: list[str] | None
+    enable_web_search: bool
 

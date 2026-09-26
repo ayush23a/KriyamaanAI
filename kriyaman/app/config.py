@@ -31,19 +31,38 @@ class Settings(BaseSettings):
     llm_enabled: bool = True
     google_api_key: str = ""
     groq_api_key: str = ""
-    llm_model: str = "gemini-2.5-flash"
+    groq_api_key_1: str = ""
+    groq_api_key_2: str = ""
+    groq_api_key_secondary: str = ""
+    llm_model: str = "gemini/gemini-3.6-flash"
     llm_temperature: float = 0.0
     llm_timeout_seconds: float = 30.0
     llm_max_retries: int = 1
     llm_retry_backoff: float = 1.0
 
     # Role-based models
-    planner_model: str = "groq/openai/gpt-oss-20b"
-    judge_model: str = "groq/openai/gpt-oss-20b"
-    generator_model: str = "gemini/gemini-2.5-flash"
-    planner_fallback_models: list[str] = Field(default_factory=lambda: ["groq/openai/gpt-oss-120b"])
-    judge_fallback_models: list[str] = Field(default_factory=lambda: ["groq/openai/gpt-oss-120b"])
-    generator_fallback_models: list[str] = Field(default_factory=lambda: ["groq/openai/gpt-oss-120b", "gemini/gemini-1.5-flash"])
+    planner_model: str = "groq/qwen/qwen3.8-27b"
+    judge_model: str = "gemini/gemini-3.6-flash"
+    generator_model: str = "gemini/gemini-3.6-flash"
+    planner_fallback_models: list[str] = Field(
+        default_factory=lambda: [
+            "groq/openai/gpt-oss-120b",
+            "gemini/gemini-3.6-flash",
+            "gemini/gemini-3.1-flash-lite",
+        ]
+    )
+    judge_fallback_models: list[str] = Field(
+        default_factory=lambda: [
+            "groq/qwen/qwen3.8-27b",
+            "gemini/gemini-3.1-flash-lite",
+        ]
+    )
+    generator_fallback_models: list[str] = Field(
+        default_factory=lambda: [
+            "gemini/gemini-3.1-flash-lite",
+            "groq/qwen/qwen3.8-27b",
+        ]
+    )
 
     # Guardrails
     pii_mode: str = "mask"  # "detect", "mask", "reject", "off"
@@ -68,6 +87,10 @@ class Settings(BaseSettings):
     max_input_tokens: int = 12_000
     max_output_tokens: int = 2_000
     max_estimated_cost_usd: Decimal = Decimal("0.25")
+
+    # Free Tier Quota / Credit Cap
+    client_free_credit_usd: float = 5.0
+    enforce_client_credit_cap: bool = True
 
     # Observability (Deferred to Phase 6)
     observability_enabled: bool = False

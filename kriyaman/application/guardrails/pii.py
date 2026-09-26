@@ -6,8 +6,10 @@ from application.guardrails.regex_rules import (
     BANK_ACCOUNT_PATTERN,
     CREDIT_CARD_PATTERN,
     EMAIL_PATTERN,
+    IBAN_PATTERN,
     IFSC_CODE_PATTERN,
     PHONE_PATTERN,
+    ROUTING_NUMBER_PATTERN,
     SSN_PATTERN,
 )
 
@@ -42,10 +44,18 @@ class PIIMiddleware:
             detected_entities.append("email")
             sanitized = EMAIL_PATTERN.sub("[EMAIL_REDACTED]", sanitized)
 
-        # 4. Bank Account / IFSC
-        if BANK_ACCOUNT_PATTERN.search(sanitized) or IFSC_CODE_PATTERN.search(sanitized):
+        # 4. Bank Account / Routing / IBAN / IFSC
+        has_fin = (
+            BANK_ACCOUNT_PATTERN.search(sanitized)
+            or ROUTING_NUMBER_PATTERN.search(sanitized)
+            or IBAN_PATTERN.search(sanitized)
+            or IFSC_CODE_PATTERN.search(sanitized)
+        )
+        if has_fin:
             detected_entities.append("financial_identifier")
             sanitized = BANK_ACCOUNT_PATTERN.sub("[FINANCIAL_ID_REDACTED]", sanitized)
+            sanitized = ROUTING_NUMBER_PATTERN.sub("[FINANCIAL_ID_REDACTED]", sanitized)
+            sanitized = IBAN_PATTERN.sub("[FINANCIAL_ID_REDACTED]", sanitized)
             sanitized = IFSC_CODE_PATTERN.sub("[FINANCIAL_ID_REDACTED]", sanitized)
 
         # 5. Phone numbers

@@ -170,3 +170,37 @@ class GenericActionResponse(BaseModel):
     message: str
     id: str | None = None
 
+
+# ---------------------------------------------------------------------------
+# Credit & Key Testing Schemas
+# ---------------------------------------------------------------------------
+
+class ClientCreditResponse(BaseModel):
+    client_id: str
+    key_mode: str
+    default_spent_usd: float
+    byok_spent_usd: float
+    credit_limit_usd: float
+    remaining_credit_usd: float
+    is_capped: bool
+
+
+class ProviderKeyStatus(BaseModel):
+    valid: bool
+    message: str
+    latency_ms: int | None = None
+
+
+class TestKeysRequest(BaseModel):
+    gemini_api_key: str | None = None
+    groq_api_key: str | None = None
+    groq_api_key_secondary: str | None = None
+    tavily_api_key: str | None = None
+
+
+class TestKeysResponse(BaseModel):
+    gemini: ProviderKeyStatus | None = None
+    groq: ProviderKeyStatus | None = None
+    groq_secondary: ProviderKeyStatus | None = None
+    tavily: ProviderKeyStatus | None = None
+

@@ -55,9 +55,19 @@ SSN_PATTERN = re.compile(
     r"\b\d{3}-\d{2}-\d{4}\b"
 )
 
-# Bank Account / Routing / IFSC identifiers
+# Bank Account / Routing / IFSC / IBAN identifiers (must contain actual account numbers/digits)
 BANK_ACCOUNT_PATTERN = re.compile(
-    r"\b(?:bank|account|acct|iban|ifsc|routing)\s*[:#]?\s*([A-Za-z0-9]{8,20})\b",
+    r"\b(?:acct|account|acc|bank\s*acct|bank\s*account)\s*[:#]?\s*(\d{8,17})\b",
+    re.IGNORECASE,
+)
+
+ROUTING_NUMBER_PATTERN = re.compile(
+    r"\b(?:routing|aba|rtn)\s*[:#]?\s*(\d{9})\b",
+    re.IGNORECASE,
+)
+
+IBAN_PATTERN = re.compile(
+    r"\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b",
     re.IGNORECASE,
 )
 

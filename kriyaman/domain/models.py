@@ -67,8 +67,17 @@ class AcquisitionPlan(BaseModel):
     tool_name: str | None = None
     tool_arguments: dict[str, Any] = Field(default_factory=dict)
     reason_code: str
+    reasoning: str | None = None
     expected_information_gain: Literal["low", "medium", "high"] = "medium"
     confidence: float | None = None
+
+
+class PlanHistoryEntry(BaseModel):
+    iteration: int = 1
+    plan: AcquisitionPlan
+    verdict: str | None = None
+    reason_code: str | None = None
+    missing_aspects: list[str] = Field(default_factory=list)
 
 
 class EvidenceItem(BaseModel):

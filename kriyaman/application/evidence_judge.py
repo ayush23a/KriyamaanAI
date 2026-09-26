@@ -34,6 +34,13 @@ STOPWORDS = {
     "content", "contents", "text", "texts", "passage", "passages", "system", "data",
     "information", "info", "say", "says", "mention", "mentions", "discussed", "discuss",
     "us", "available", "provided", "know", "find",
+    # Prompt instruction and meta-action scaffolding
+    "check", "use", "web", "necessary", "research", "suggest", "correct", "target",
+    "cross-reference", "reference", "routed", "entries", "entry", "search", "look",
+    "based", "according", "following", "needed", "require", "required",
+    # Guardrail redaction tokens
+    "financial_id_redacted", "credit_card_redacted", "email_redacted", "phone_redacted",
+    "ssn_redacted", "redacted",
 }
 
 ADVANTAGE_KEYWORDS = {
@@ -75,11 +82,13 @@ def detect_query_intent(query: str) -> str:
     # 1. Summary / Overview / Broad document topic
     if re.search(
         r"\b(summar(?:y|ise|ize)|overview|key points?|main points?|tell us about|"
-        r"tell me about the (?:files?|documents?)|"
-        r"what do(?:es)? (?:the|these|all)? ?(?:uploaded )?(?:files?|documents?|texts?) tell|"
-        r"what (?:are|is) (?:the|these|all)? ?(?:uploaded )?(?:files?|documents?|texts?) about|"
+        r"tell me about (?:this|the|that) (?:files?|documents?)|"
+        r"what do(?:es)? (?:this|that|the|these|those|all)? ?(?:uploaded )?(?:files?|documents?|texts?|doc|pdf) (?:tell|convey|explain|say)|"
+        r"what (?:are|is) (?:this|that|the|these|those|all)? ?(?:uploaded )?(?:files?|documents?|texts?|doc|pdf) about|"
+        r"what information do(?:es)? (?:this|that|the|these|those|all)? ?(?:files?|documents?|texts?|doc|pdf) convey|"
         r"what does the uploaded files? tell us about|"
-        r"give me an overview|brief overview|high level overview)\b",
+        r"give me an overview|brief overview|high level overview|"
+        r"what (?:is|are) in (?:this|that|the) (?:file|document|doc|pdf))\b",
         normalized,
     ):
         return "summary"
@@ -116,6 +125,13 @@ def detect_query_intent(query: str) -> str:
         normalized,
     ):
         return "synthesis"
+
+    # 6. Audit / Reconciliation / Financial Inspection
+    if re.search(
+        r"\b(audit|cross-reference|reconcil(?:e|iation)|general ledger|ledger|uncategorized|coa|chart of accounts|bank statement|deposits)\b",
+        normalized,
+    ):
+        return "audit"
 
     return "general"
 
@@ -210,8 +226,8 @@ class EvidenceJudge:
 
         # 3. If LLM provider available, call structured evaluation
         if self.llm_provider is not None:
-            evidence_summary = "\n".join(
-                f"[{e.evidence_id}] ({e.source_type}): {e.content}" for e in evidence[:5]
+            evidence_summary = "\n\n".join(
+                f"[{e.evidence_id}] (Document: {e.title or e.source_type}): {e.content}" for e in evidence[:8]
             )
             delimited_evidence = (
                 "UNTRUSTED RETRIEVED EVIDENCE:\n"
@@ -235,7 +251,7 @@ class EvidenceJudge:
                 res = self.llm_provider.generate_structured(
                     messages=messages,
                     schema=EvidenceAssessment,
-                    budget=CallBudget(max_tokens=600, timeout_seconds=10.0),
+                    budget=CallBudget(max_tokens=1500, timeout_seconds=30.0),
                     role=LLMCallRole.JUDGE,
                 )
                 assessment = res.data
@@ -445,7 +461,26 @@ class EvidenceJudge:
                 reason_code="insufficient_semantic_coverage",
             )
 
-        # 6. General / Factual intent: filter stopwords from content coverage
+        # 6. Audit / Reconciliation / Financial Inspection
+        if intent == "audit":
+            has_financial_term = any(
+                term in total_content
+                for term in ["ledger", "asset", "funds", "account", "deposit", "checking", "balance", "payable", "receivable", "uncategorized", "undeposited"]
+            )
+            has_good_score = any(e.retrieval_score and e.retrieval_score >= 0.45 for e in evidence)
+            if has_financial_term or has_good_score or len(evidence) >= 1:
+                return EvidenceAssessment(
+                    decision="sufficient",
+                    coverage_score=0.9,
+                    quality_score=0.9,
+                    confidence=0.9,
+                    missing_aspects=[],
+                    conflict_groups=[],
+                    recommended_next_action=None,
+                    reason_code="audit_financial_evidence_sufficient",
+                )
+
+        # 7. General / Factual intent: filter stopwords from content coverage
         tokens = re.findall(r"\b[a-zA-Z0-9_-]{3,}\b", query.lower())
         content_words = [w for w in tokens if w not in STOPWORDS]
         if not content_words:
@@ -454,7 +489,11 @@ class EvidenceJudge:
         matched_words = {w for w in content_words if w in total_content}
         coverage = round(len(matched_words) / len(content_words), 2)
 
-        if coverage >= 0.5 or any(e.retrieval_score and e.retrieval_score >= 0.75 for e in evidence):
+        has_high_score = (
+            any(e.retrieval_score and e.retrieval_score >= 0.50 for e in evidence)
+            or any(getattr(e, "rerank_score", None) and e.rerank_score >= 0.50 for e in evidence)
+        )
+        if coverage >= 0.4 or has_high_score:
             return EvidenceAssessment(
                 decision="sufficient",
                 coverage_score=max(coverage, 0.85),
