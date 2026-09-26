@@ -1,4 +1,6 @@
+import asyncio
 from collections.abc import AsyncGenerator
+from typing import Any
 from sqlalchemy import create_engine
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -17,16 +19,28 @@ class Base(DeclarativeBase):
 # Async engine & session factory (used by FastAPI and runtime)
 _async_engine: AsyncEngine | None = None
 _async_session_factory: async_sessionmaker[AsyncSession] | None = None
+_async_engine_loop: Any = None
 
 
 def get_async_engine() -> AsyncEngine:
-    global _async_engine
-    if _async_engine is None:
+    global _async_engine, _async_session_factory, _async_engine_loop
+    try:
+        import asyncio
+        current_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        current_loop = None
+
+    if (
+        _async_engine is None
+        or (_async_engine_loop is not None and current_loop is not None and _async_engine_loop != current_loop)
+    ):
         _async_engine = create_async_engine(
             settings.database_url,
             echo=False,
             pool_pre_ping=True,
         )
+        _async_session_factory = None
+        _async_engine_loop = current_loop
     return _async_engine
 
 

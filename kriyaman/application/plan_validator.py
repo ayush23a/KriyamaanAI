@@ -58,6 +58,7 @@ class PlanValidator:
         budgets: ExecutionBudgets | None = None,
         usage: UsageSnapshot | None = None,
         is_tool_approved: bool = False,
+        enable_web_search: bool = True,
     ) -> PlanValidationResult:
         errors: list[str] = []
         updates: dict[str, object] = {}
@@ -74,6 +75,21 @@ class PlanValidator:
                 errors=errors,
                 reason_code="invalid_action",
             )
+
+        if not enable_web_search and plan.action == "web_search":
+            errors.append("Web search is disabled for this session/run")
+            fallback_plan = plan.model_copy(
+                update={"action": "vector_search", "filters": {}, "reason_code": "web_search_disabled"}
+            )
+            return PlanValidationResult(
+                is_valid=False,
+                sanitized_plan=fallback_plan,
+                errors=errors,
+                reason_code="web_search_disabled",
+            )
+
+        if plan.action == "web_search" and plan.filters:
+            updates["filters"] = {}
 
         # 2. Parameter bounds (top_k clamping)
         clamped_top_k = max(self.min_top_k, min(self.max_top_k, plan.top_k))

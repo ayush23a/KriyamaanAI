@@ -11,6 +11,7 @@ from sqlalchemy import (
     LargeBinary,
     String,
     Text,
+    func,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from persistence.db import Base
@@ -134,6 +135,7 @@ class DocumentChunkModel(Base):
 
     __table_args__ = (
         Index("idx_chunk_doc_index", "document_id", "chunk_index", unique=True),
+        Index("idx_document_chunks_content_tsv", func.to_tsvector("english", content), postgresql_using="gin"),
     )
 
 

@@ -226,8 +226,8 @@ class EvidenceJudge:
 
         # 3. If LLM provider available, call structured evaluation
         if self.llm_provider is not None:
-            evidence_summary = "\n".join(
-                f"[{e.evidence_id}] ({e.source_type}): {e.content}" for e in evidence[:5]
+            evidence_summary = "\n\n".join(
+                f"[{e.evidence_id}] (Document: {e.title or e.source_type}): {e.content}" for e in evidence[:8]
             )
             delimited_evidence = (
                 "UNTRUSTED RETRIEVED EVIDENCE:\n"
@@ -251,7 +251,7 @@ class EvidenceJudge:
                 res = self.llm_provider.generate_structured(
                     messages=messages,
                     schema=EvidenceAssessment,
-                    budget=CallBudget(max_tokens=600, timeout_seconds=10.0),
+                    budget=CallBudget(max_tokens=1500, timeout_seconds=30.0),
                     role=LLMCallRole.JUDGE,
                 )
                 assessment = res.data

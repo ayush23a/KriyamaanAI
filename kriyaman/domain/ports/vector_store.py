@@ -9,6 +9,9 @@ class VectorStore(Protocol):
     def search(self, request: VectorSearchRequest) -> list[EvidenceItem]:
         ...
 
+    def hybrid_search(self, request: VectorSearchRequest) -> list[EvidenceItem]:
+        ...
+
     def delete_document(self, document_id: str) -> None:
         ...
 

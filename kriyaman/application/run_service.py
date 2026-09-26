@@ -189,6 +189,7 @@ class RunExecutionService:
             "guardrail_rejected": False,
             "guardrail_reason_code": None,
             "session_documents": session_documents,
+            "enable_web_search": enable_web_search,
         }
 
         # 6. Execute Graph

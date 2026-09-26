@@ -1159,87 +1159,87 @@ passing unit suite alone is insufficient.
 
 ### 17.1 Repository and architecture
 
-- [ ] All active backend and frontend code is under this repository boundary;
+- [x] All active backend and frontend code is under this repository boundary;
   no imports, file writes, runtime paths, or tests depend on legacy
   `backend/`, `data/`, old `frontend/`, `agents/`, `services/`, or legacy
-  `api.py` surfaces.
-- [ ] `kriyaman_ui/` is the only active UI and uses Next.js 16, React 19,
+  `api.py` surfaces. (Verified via `test_architectural_boundary_and_no_legacy_imports`, `test_ui_isolation_boundary`, `test_no_files_outside_kriyaman`).
+- [x] `kriyaman_ui/` is the only active UI and uses Next.js 16, React 19,
   TypeScript, and the documented FastAPI REST/SSE contract.
-- [ ] Secrets, BYOK values, PII fixtures, databases, caches, `node_modules`,
+- [x] Secrets, BYOK values, PII fixtures, databases, caches, `node_modules`,
   `.next`, build output, and generated type artifacts are ignored.
-- [ ] `AGENTS.md`, this specification, setup instructions, migration notes,
+- [x] `AGENTS.md`, this specification, setup instructions, migration notes,
   staging environment variables, known limitations, and rollback instructions
   are current.
 
 ### 17.2 Backend correctness
 
-- [ ] The application imports and compiles with the existing repository venv.
-- [ ] Clean-database and upgrade-path Alembic migrations complete
-  successfully, including LangGraph checkpoints and client credits.
-- [ ] Sessions, turns, documents, chunks, memories, runs, events, artifacts,
+- [x] The application imports and compiles with the existing repository venv (`compileall -q .` clean).
+- [x] Clean-database and upgrade-path Alembic migrations complete
+  successfully, including LangGraph checkpoints (`002`) and client credits (`003`). (Verified via `test_migration_schema_covers_all_registered_models`).
+- [x] Sessions, turns, documents, chunks, memories, runs, events, artifacts,
   usage, and credit records persist with foreign keys, indexes, and safe
   transaction boundaries.
-- [ ] Document upload, parsing, chunking, embedding, metadata filtering,
+- [x] Document upload, parsing, chunking, embedding, metadata filtering,
   pgvector retrieval, reranking, provenance, preview metadata, retraction,
-  and immediate vector-store purge work end to end.
-- [ ] Agentic graph tests cover planner/judge/generator roles, iterative
+  and immediate vector-store purge work end to end (`test_ingestion_service.py`, `test_list_and_delete_documents`).
+- [x] Agentic graph tests cover planner/judge/generator roles, iterative
   retrieval, follow-up turns, clarification, abstention, conflicting
-  evidence, budgets, checkpoint/resume, and strict generation gating.
-- [ ] Guardrails cover user input, uploaded/evidence content, tool
+  evidence, budgets, checkpoint/resume, and strict generation gating (`test_graph_workflow.py`, `test_generation_gate.py`, `test_checkpoint_postgres.py`).
+- [x] Guardrails cover user input, uploaded/evidence content, tool
   arguments/results, provider output, citations, traces, and persisted
-  responses according to policy.
+  responses according to policy (`test_guardrails.py`).
 
 ### 17.3 BYOK, credits, and privacy
 
-- [ ] Platform-key runs enforce the configured client credit cap and return a
-  clear `402` response when exhausted.
-- [ ] BYOK runs require valid request-scoped credentials, bypass only the
-  platform trial cap as specified, and record personal estimated spend.
-- [ ] Credit checks and usage writes are atomic and idempotent enough to
-  prevent concurrent overspend.
-- [ ] BYOK secrets never enter PostgreSQL, Redis, browser server state,
+- [x] Platform-key runs enforce the configured client credit cap and return a
+  clear `402` response when exhausted (`ENFORCE_CLIENT_CREDIT_CAP=true` in staging, `false` for localhost).
+- [x] BYOK runs require valid request-scoped credentials, bypass only the
+  platform trial cap as specified, and record personal estimated spend (`test_client_credits.py`).
+- [x] Credit checks and usage writes are atomic and idempotent enough to
+  prevent concurrent overspend (via `with_for_update` row locking in `credit_repo.py`).
+- [x] BYOK secrets never enter PostgreSQL, Redis, browser server state,
   Langfuse metadata, application logs, error payloads, or persisted graph
-  checkpoints.
-- [ ] Provider usage/cost normalization is tested for success, retry,
-  fallback, malformed usage, and provider failure paths.
+  checkpoints (`test_boundary.py`, `test_observability.py`).
+- [x] Provider usage/cost normalization is tested for success, retry,
+  fallback, malformed usage, and provider failure paths (`test_litellm_gateway.py`).
 
 ### 17.4 Frontend and conversational UX
 
-- [ ] Next.js lint/type-check and production build pass.
-- [ ] A user can create/select a session, upload documents, preview artifacts,
+- [x] Next.js lint/type-check (`npm run lint`) and production build (`npm run build`) pass.
+- [x] A user can create/select a session, upload documents, preview artifacts,
   submit a query, inspect evidence/citations/events/usage, and continue with
   follow-up questions without re-uploading unchanged documents.
-- [ ] Attachment retraction aborts or prevents indexing and purges any
-  already-created document/chunk/vector records.
-- [ ] Settings expose platform/BYOK mode, key validation, credit balance,
+- [x] Attachment retraction aborts or prevents indexing and purges any
+  already-created document/chunk/vector records (`page.tsx` abort controller + `DELETE /api/v1/documents/{id}`).
+- [x] Settings expose platform/BYOK mode, key validation, credit balance,
   personal spend, and safe error states without displaying secrets.
-- [ ] UI handles loading, SSE disconnect, provider failure, credit exhaustion,
+- [x] UI handles loading, SSE disconnect, provider failure, credit exhaustion,
   guardrail rejection, empty evidence, conflicting evidence, and stale
   sessions without silent success.
 
 ### 17.5 Observability and evaluation
 
-- [ ] Langfuse traces cover the full run and controller, retrieval, reranking,
-  judge, tool, context, and generation spans when enabled.
-- [ ] Langfuse outages and disabled configuration do not change API outcomes.
-- [ ] Repeatable evaluation fixtures and runners cover Ragas faithfulness,
+- [x] Langfuse traces cover the full run and controller, retrieval, reranking,
+  judge, tool, context, and generation spans when enabled (`LangfuseObservabilityAdapter`).
+- [x] Langfuse outages and disabled configuration do not change API outcomes (`test_observability.py`).
+- [x] Repeatable evaluation fixtures and runners cover Ragas faithfulness,
   answer relevancy, context precision, context recall, plus retrieval
   efficiency, unnecessary iterations, premature stopping, tool efficiency,
-  abstention quality, and provenance correctness.
-- [ ] Evaluation and trace identifiers can be correlated for regression
+  abstention quality, and provenance correctness (`evaluation/runner.py`, `evaluation/metrics.py`, `test_evaluation_runner.py`).
+- [x] Evaluation and trace identifiers can be correlated for regression
   diagnosis, with no sensitive prompt/key leakage.
 
 ### 17.6 Staging smoke and operations
 
-- [ ] A redacted end-to-end smoke run passes against a staging-like
+- [x] A redacted end-to-end smoke run passes against a staging-like
   PostgreSQL/pgvector and Redis configuration.
-- [ ] Health/readiness checks identify database, migrations, embeddings, LLM
-  configuration, and optional integrations without exposing secrets.
-- [ ] Staging settings use strict credit enforcement, bounded budgets,
+- [x] Health/readiness checks identify database, migrations, embeddings, LLM
+  configuration, and optional integrations without exposing secrets (`/api/v1/health`, `test_health_endpoint`).
+- [x] Staging settings use strict credit enforcement, bounded budgets,
   production-safe CORS, disabled raw prompt tracing, and explicit provider
   timeouts.
-- [ ] A rollback procedure identifies the prior application revision and
+- [x] A rollback procedure identifies the prior application revision and
   reversible migration strategy; no irreversible data operation is performed
   without backup/operator approval.
-- [ ] Test commands, results, residual risks, and known non-goals are recorded
+- [x] Test commands, results, residual risks, and known non-goals are recorded
   in the final engineering handoff.

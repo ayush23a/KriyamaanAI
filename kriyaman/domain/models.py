@@ -72,6 +72,14 @@ class AcquisitionPlan(BaseModel):
     confidence: float | None = None
 
 
+class PlanHistoryEntry(BaseModel):
+    iteration: int = 1
+    plan: AcquisitionPlan
+    verdict: str | None = None
+    reason_code: str | None = None
+    missing_aspects: list[str] = Field(default_factory=list)
+
+
 class EvidenceItem(BaseModel):
     evidence_id: str
     source_type: Literal["document", "web", "memory", "tool"]

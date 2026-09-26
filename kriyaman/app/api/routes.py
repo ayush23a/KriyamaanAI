@@ -1,7 +1,8 @@
+import json
 import uuid
 from typing import Annotated
-from fastapi import APIRouter, Depends, File, Header, HTTPException, UploadFile, status
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Depends, File, Header, HTTPException, Request, UploadFile, status
+from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import Settings, settings
 from app.api.schemas import (
@@ -565,15 +566,30 @@ async def get_run(
 
 @router.get(
     "/runs/{run_id}/events",
-    response_model=RunEventsResponse,
     summary="Structured event stream or replay",
 )
 async def get_run_events(
     run_id: str,
+    request: Request,
     db: Annotated[AsyncSession, Depends(get_db)],
-) -> RunEventsResponse:
+):
     event_repo = RunEventRepository(db)
     events = await event_repo.list_by_run(run_id)
+
+    accept_header = request.headers.get("accept", "")
+    if "text/event-stream" in accept_header or request.query_params.get("stream") == "true":
+        async def event_generator():
+            for e in events:
+                evt_dict = {
+                    "sequence": e.sequence,
+                    "event_type": e.event_type,
+                    "payload": e.payload_json or {},
+                    "timestamp": e.created_at.isoformat() if e.created_at else None,
+                }
+                yield f"event: run_event\ndata: {json.dumps(evt_dict)}\n\n"
+            yield f"event: done\ndata: {json.dumps({'run_id': run_id})}\n\n"
+
+        return StreamingResponse(event_generator(), media_type="text/event-stream")
 
     return RunEventsResponse(
         run_id=run_id,

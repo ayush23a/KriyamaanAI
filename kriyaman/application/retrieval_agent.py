@@ -57,16 +57,25 @@ class RetrievalAgent:
                 search_filters = dict(plan.filters)
                 search_filters.setdefault("session_id", session_id)
 
+                # Two-stage oversampling: pull wider candidate pool when reranking is active
+                fetch_k = max(plan.top_k * 4, 20) if (plan.rerank and self.reranker is not None) else plan.top_k
+
                 req = VectorSearchRequest(
                     query=query,
-                    top_k=plan.top_k,
+                    top_k=fetch_k,
                     filters=search_filters,
                 )
-                items = self.vector_store.search(req)
+
+                if plan.action == "hybrid_search" and hasattr(self.vector_store, "hybrid_search"):
+                    items = self.vector_store.hybrid_search(req)
+                else:
+                    items = self.vector_store.search(req)
 
                 # Rerank if requested
                 if plan.rerank and self.reranker is not None and items:
                     items = self.reranker.rerank(query, items, top_k=plan.top_k)
+                else:
+                    items = items[: plan.top_k]
 
                 new_evidence.extend(items)
 

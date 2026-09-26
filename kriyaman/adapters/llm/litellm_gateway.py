@@ -25,15 +25,24 @@ T = TypeVar("T")
 def _extract_json_text(text: str) -> str:
     """Extracts raw JSON content from markdown code fences or surrounding text."""
     stripped = text.strip()
-    if stripped.startswith("```"):
-        match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", stripped)
-        if match:
-            return match.group(1).strip()
+    if not stripped:
+        return "{}"
+
+    match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", stripped)
+    if match:
+        stripped = match.group(1).strip()
+    elif stripped.startswith("```"):
+        stripped = re.sub(r"^```(?:json)?\s*", "", stripped).strip()
+
+    if stripped.endswith("```"):
+        stripped = stripped[:-3].strip()
 
     start_brace = stripped.find("{")
     end_brace = stripped.rfind("}")
     if start_brace != -1 and end_brace != -1 and end_brace > start_brace:
         return stripped[start_brace : end_brace + 1]
+    if start_brace != -1:
+        return stripped[start_brace:]
 
     return stripped
 
@@ -217,10 +226,11 @@ class LiteLLMGatewayAdapter(LLMProvider):
                         kwargs: dict[str, Any] = {
                             "model": norm_model,
                             "messages": litellm_messages,
-                            "temperature": self.temperature,
                             "timeout": timeout,
                             "api_key": api_key,
                         }
+                        if "gemini-3" not in norm_model.lower():
+                            kwargs["temperature"] = self.temperature
                         if max_tokens:
                             kwargs["max_tokens"] = max_tokens
 
@@ -315,11 +325,12 @@ class LiteLLMGatewayAdapter(LLMProvider):
                         kwargs: dict[str, Any] = {
                             "model": norm_model,
                             "messages": litellm_messages,
-                            "temperature": self.temperature,
                             "timeout": timeout,
                             "api_key": api_key,
                             "response_format": {"type": "json_object"},
                         }
+                        if "gemini-3" not in norm_model.lower():
+                            kwargs["temperature"] = self.temperature
                         if max_tokens:
                             kwargs["max_tokens"] = max_tokens
 
@@ -363,6 +374,10 @@ class LiteLLMGatewayAdapter(LLMProvider):
                             schema.__name__,
                             str(v_exc),
                         )
+                        # If output was completely empty or json cutoff at EOF, retry if attempts remain
+                        if attempt < self.max_retries and ("EOF while parsing" in str(v_exc) or not content.strip()):
+                            time.sleep(self.retry_backoff * (2**attempt))
+                            continue
                         # Escalate to next model immediately on schema validation failure
                         break
                     except Exception as exc:

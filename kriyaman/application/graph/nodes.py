@@ -18,6 +18,7 @@ from domain.models import (
     Answer,
     ExecutionBudgets,
     ExecutionEvent,
+    PlanHistoryEntry,
     UsageSnapshot,
 )
 
@@ -124,6 +125,7 @@ class GraphNodes:
                 action="abstain",
                 reason_code=state.get("guardrail_reason_code") or "guardrail_rejected",
             )
+            entry = PlanHistoryEntry(iteration=1, plan=plan, verdict="abstain", reason_code=plan.reason_code)
             event = ExecutionEvent(
                 run_id=state["run_id"],
                 sequence=len(state.get("execution_events", [])),
@@ -132,7 +134,7 @@ class GraphNodes:
             )
             return {
                 "controller_plan": plan,
-                "plan_history": [*state.get("plan_history", []), plan],
+                "plan_history": [*state.get("plan_history", []), entry],
                 "execution_events": [*state.get("execution_events", []), event],
             }
 
@@ -142,6 +144,7 @@ class GraphNodes:
                 reasoning="Execution budget exhausted before controller planning.",
                 reason_code="budget_exhausted",
             )
+            entry = PlanHistoryEntry(iteration=1, plan=plan, verdict="abstain", reason_code="budget_exhausted")
             event = ExecutionEvent(
                 run_id=state["run_id"],
                 sequence=len(state.get("execution_events", [])),
@@ -150,7 +153,7 @@ class GraphNodes:
             )
             return {
                 "controller_plan": plan,
-                "plan_history": [*state.get("plan_history", []), plan],
+                "plan_history": [*state.get("plan_history", []), entry],
                 "execution_events": [*state.get("execution_events", []), event],
             }
 
@@ -158,6 +161,7 @@ class GraphNodes:
         if self.retrieval_agent.tool_registry:
             available_tools = [t.name for t in self.retrieval_agent.tool_registry.describe_available()]
 
+        enable_web_search = state.get("enable_web_search", False)
         plan = self.controller.decide(
             query=state["user_query"],
             normalized_query=state["normalized_query"],
@@ -171,6 +175,7 @@ class GraphNodes:
             budgets=state["budgets"],
             usage=state["usage"],
             available_tools=available_tools,
+            enable_web_search=enable_web_search,
         )
 
         val_result = self.plan_validator.validate(
@@ -178,6 +183,7 @@ class GraphNodes:
             tool_registry=self.retrieval_agent.tool_registry,
             budgets=state.get("budgets"),
             usage=state.get("usage"),
+            enable_web_search=enable_web_search,
         )
         final_plan = val_result.sanitized_plan
 
@@ -203,9 +209,13 @@ class GraphNodes:
         )
         events.append(event)
 
+        plan_entry = PlanHistoryEntry(
+            iteration=len(state.get("plan_history", [])) + 1,
+            plan=final_plan,
+        )
         return {
             "controller_plan": final_plan,
-            "plan_history": [*state.get("plan_history", []), final_plan],
+            "plan_history": [*state.get("plan_history", []), plan_entry],
             "execution_events": events,
         }
 
@@ -282,6 +292,26 @@ class GraphNodes:
             max_iterations=state["budgets"].max_retrieval_iterations,
         )
 
+        history = list(state.get("plan_history", []))
+        if history:
+            last = history[-1]
+            if isinstance(last, PlanHistoryEntry):
+                history[-1] = last.model_copy(
+                    update={
+                        "verdict": assessment.decision,
+                        "reason_code": assessment.reason_code,
+                        "missing_aspects": list(assessment.missing_aspects or []),
+                    }
+                )
+            elif isinstance(last, AcquisitionPlan):
+                history[-1] = PlanHistoryEntry(
+                    iteration=len(history),
+                    plan=last,
+                    verdict=assessment.decision,
+                    reason_code=assessment.reason_code,
+                    missing_aspects=list(assessment.missing_aspects or []),
+                )
+
         event = ExecutionEvent(
             run_id=state["run_id"],
             sequence=len(state.get("execution_events", [])),
@@ -296,6 +326,7 @@ class GraphNodes:
 
         return {
             "evidence_assessment": assessment,
+            "plan_history": history,
             "execution_events": [*state.get("execution_events", []), event],
         }
 
@@ -304,12 +335,15 @@ class GraphNodes:
         if not assessment:
             return {}
 
+        enable_web_search = state.get("enable_web_search", False)
         plan = self.controller.refine(
             query=state["normalized_query"],
             prior_assessment=assessment,
             retrieval_iterations=state.get("retrieval_iterations", 0),
             budgets=state["budgets"],
             session_documents=state.get("session_documents"),
+            plan_history=state.get("plan_history", []),
+            enable_web_search=enable_web_search,
         )
 
         val_result = self.plan_validator.validate(
@@ -317,6 +351,7 @@ class GraphNodes:
             tool_registry=self.retrieval_agent.tool_registry,
             budgets=state.get("budgets"),
             usage=state.get("usage"),
+            enable_web_search=enable_web_search,
         )
         final_plan = val_result.sanitized_plan
 
@@ -342,9 +377,13 @@ class GraphNodes:
         )
         events.append(event)
 
+        plan_entry = PlanHistoryEntry(
+            iteration=len(state.get("plan_history", [])) + 1,
+            plan=final_plan,
+        )
         return {
             "controller_plan": final_plan,
-            "plan_history": [*state.get("plan_history", []), final_plan],
+            "plan_history": [*state.get("plan_history", []), plan_entry],
             "execution_events": events,
         }
 
