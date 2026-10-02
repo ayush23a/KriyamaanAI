@@ -41,9 +41,11 @@ export const ArtifactsDrawer: React.FC<ArtifactsDrawerProps> = ({
   );
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      await onUploadDocument(file);
+    const files = e.target.files;
+    if (files && files.length > 0) {
+      for (const file of Array.from(files)) {
+        await onUploadDocument(file);
+      }
     }
     if (fileInputRef.current) {
       fileInputRef.current.value = '';
@@ -80,6 +82,7 @@ export const ArtifactsDrawer: React.FC<ArtifactsDrawerProps> = ({
       <input
         ref={fileInputRef}
         type="file"
+        multiple
         className="hidden"
         onChange={handleFileChange}
         accept=".pdf,.docx,.txt,.md,.html"

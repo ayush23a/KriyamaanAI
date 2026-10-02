@@ -8,3 +8,4 @@ dist
 app.streamlit.py.bak
 *.bak
 .env
+*.tsbuildinfo

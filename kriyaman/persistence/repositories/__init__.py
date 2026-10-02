@@ -12,6 +12,7 @@ from persistence.repositories.run_repo import (
 )
 from persistence.repositories.session_repo import SessionRepository
 from persistence.repositories.turn_repo import ConversationTurnRepository
+from persistence.repositories.user_repo import UserRepository
 
 __all__ = [
     "BaseRepository",
@@ -25,4 +26,5 @@ __all__ = [
     "RunRepository",
     "SessionRepository",
     "ToolCallRepository",
+    "UserRepository",
 ]

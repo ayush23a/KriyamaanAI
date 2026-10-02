@@ -65,6 +65,10 @@ class PgVectorStore(VectorStore):
             )
 
             # Apply metadata filters
+            user_id = request.filters.get("user_id")
+            if user_id:
+                stmt = stmt.where(DocumentModel.user_id == str(user_id))
+
             session_id = request.filters.get("session_id")
             if session_id:
                 stmt = stmt.where(DocumentModel.session_id == str(session_id))
@@ -121,7 +125,24 @@ class PgVectorStore(VectorStore):
             with self._session_factory() as session:
                 clean_q = request.query.strip()
                 to_tsv = func.to_tsvector("english", DocumentChunkModel.content)
-                plain_q = func.plainto_tsquery("english", clean_q)
+
+                import re
+                tokens = re.findall(r"\b[a-zA-Z0-9_-]{2,}\b", clean_q.lower())
+                stopwords = {
+                    "a", "about", "above", "after", "again", "against", "all", "am", "an", "and", "any", "are",
+                    "as", "at", "be", "because", "been", "before", "being", "below", "between", "both", "but",
+                    "by", "could", "did", "do", "does", "doing", "down", "during", "each", "few", "for", "from",
+                    "further", "had", "has", "have", "having", "he", "her", "here", "him", "his", "how", "i", "if",
+                    "in", "into", "is", "it", "its", "let", "me", "more", "most", "my", "no", "nor", "not", "of",
+                    "on", "once", "only", "or", "other", "ought", "our", "out", "over", "own", "same", "she", "should",
+                    "so", "some", "such", "than", "that", "the", "their", "them", "then", "there", "these", "they",
+                    "this", "those", "through", "to", "too", "under", "until", "up", "very", "was", "we", "were",
+                    "what", "when", "where", "which", "while", "who", "whom", "why", "with", "would", "you", "your",
+                    "tell", "check", "also", "please", "can", "give", "show", "find", "file", "files", "document"
+                }
+                content_tokens = [t for t in tokens if t not in stopwords]
+                ts_query_str = " ".join(content_tokens) if content_tokens else clean_q
+                plain_q = func.plainto_tsquery("english", ts_query_str)
                 ts_rank = func.ts_rank_cd(to_tsv, plain_q).label("ts_rank")
 
                 stmt = (
@@ -129,6 +150,10 @@ class PgVectorStore(VectorStore):
                     .join(DocumentModel, DocumentChunkModel.document_id == DocumentModel.id)
                     .where(to_tsv.op("@@")(plain_q))
                 )
+
+                user_id = request.filters.get("user_id")
+                if user_id:
+                    stmt = stmt.where(DocumentModel.user_id == str(user_id))
 
                 session_id = request.filters.get("session_id")
                 if session_id:
@@ -150,6 +175,31 @@ class PgVectorStore(VectorStore):
                         rows = session.execute(stmt.order_by(ts_rank.desc()).limit(candidate_k)).all()
                 else:
                     rows = session.execute(stmt.order_by(ts_rank.desc()).limit(candidate_k)).all()
+
+                # Fallback to OR query over key content tokens if strict conjunction yields few or no hits
+                if not rows and content_tokens:
+                    valid_or_terms = [re.sub(r"[^a-zA-Z0-9]", "", t) for t in content_tokens[:8] if len(re.sub(r"[^a-zA-Z0-9]", "", t)) >= 2]
+                    if valid_or_terms:
+                        try:
+                            or_expr = " | ".join(valid_or_terms)
+                            or_tsq = func.to_tsquery("english", or_expr)
+                            or_rank = func.ts_rank_cd(to_tsv, or_tsq).label("ts_rank")
+                            or_stmt = (
+                                select(DocumentChunkModel, DocumentModel, or_rank)
+                                .join(DocumentModel, DocumentChunkModel.document_id == DocumentModel.id)
+                                .where(to_tsv.op("@@")(or_tsq))
+                            )
+                            if user_id:
+                                or_stmt = or_stmt.where(DocumentModel.user_id == str(user_id))
+                            if session_id:
+                                or_stmt = or_stmt.where(DocumentModel.session_id == str(session_id))
+                            if document_id:
+                                or_stmt = or_stmt.where(DocumentChunkModel.document_id == str(document_id))
+                            if document_name:
+                                or_stmt = or_stmt.where(DocumentModel.name.ilike(f"%{document_name}%"))
+                            rows = session.execute(or_stmt.order_by(or_rank.desc()).limit(candidate_k)).all()
+                        except Exception:
+                            pass
 
                 sparse_items = rows
 
@@ -184,10 +234,15 @@ class PgVectorStore(VectorStore):
         fused = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
         results: list[EvidenceItem] = []
         for chunk_id, score in fused[: request.top_k]:
-            evidence = item_map[chunk_id].model_copy(
+            orig = item_map[chunk_id]
+            scaled_rrf = min(1.0, score * 55.0)
+            orig_score = getattr(orig, "retrieval_score", 0.0) or 0.0
+            final_score = round(max(orig_score, scaled_rrf), 4)
+
+            evidence = orig.model_copy(
                 update={
                     "retrieval_method": "hybrid_rrf",
-                    "retrieval_score": round(min(1.0, score * 30.0), 4),
+                    "retrieval_score": final_score,
                 }
             )
             results.append(evidence)

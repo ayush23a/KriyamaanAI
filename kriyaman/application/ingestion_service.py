@@ -47,6 +47,7 @@ class IngestionService:
         filename: str,
         content: bytes,
         extra_metadata: dict[str, Any] | None = None,
+        user_id: str | None = None,
     ) -> IngestionResult:
         if len(content) > MAX_FILE_SIZE_BYTES:
             raise ValidationError(
@@ -61,7 +62,7 @@ class IngestionService:
         chunk_repo = DocumentChunkRepository(session)
 
         # 1. Idempotency check: duplicate document in same session
-        existing_doc = await doc_repo.get_by_session_and_hash(session_id, doc_hash)
+        existing_doc = await doc_repo.get_by_session_and_hash(session_id, doc_hash, user_id=user_id)
         if existing_doc:
             existing_chunks = await chunk_repo.list_by_document(existing_doc.id)
             return IngestionResult(
@@ -78,6 +79,8 @@ class IngestionService:
         # 2. Parse document text
         parsed_text, parse_metadata = DocumentParser.parse(clean_filename, content)
         combined_metadata = {**(extra_metadata or {}), **parse_metadata}
+        if user_id:
+            combined_metadata["user_id"] = user_id
 
         # 3. Create document record
         document_id = str(uuid.uuid4())
@@ -89,13 +92,18 @@ class IngestionService:
             status="processing",
             metadata=combined_metadata,
             document_id=document_id,
+            user_id=user_id,
         )
 
         # 4. Chunk document text
+        base_meta = {"session_id": session_id, "document_name": clean_filename}
+        if user_id:
+            base_meta["user_id"] = user_id
+
         domain_chunks = self.chunker.chunk_text(
             document_id=document_id,
             text=parsed_text,
-            base_metadata={"session_id": session_id, "document_name": clean_filename},
+            base_metadata=base_meta,
         )
 
         if not domain_chunks:

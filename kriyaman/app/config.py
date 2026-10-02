@@ -22,6 +22,17 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/kriyaman"
     database_url_sync: str = "postgresql+psycopg://postgres:postgres@localhost:5432/kriyaman"
 
+    # Authentication (Clerk)
+    clerk_secret_key: str = ""
+    clerk_publishable_key: str = Field(
+        default="",
+        validation_alias="NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY",
+    )
+    clerk_pem_public_key: str = ""
+    clerk_jwks_url: str = ""
+    clerk_issuer: str = ""
+    clerk_audience: str = ""
+
     # Cache (Redis)
     redis_url: str = "redis://localhost:6379/0"
     cache_enabled: bool = True
@@ -34,32 +45,34 @@ class Settings(BaseSettings):
     groq_api_key_1: str = ""
     groq_api_key_2: str = ""
     groq_api_key_secondary: str = ""
-    llm_model: str = "gemini/gemini-3.6-flash"
+    llm_model: str = "gemini/gemini-2.5-flash"
     llm_temperature: float = 0.0
     llm_timeout_seconds: float = 30.0
     llm_max_retries: int = 1
     llm_retry_backoff: float = 1.0
 
     # Role-based models
-    planner_model: str = "groq/qwen/qwen3.8-27b"
-    judge_model: str = "gemini/gemini-3.6-flash"
-    generator_model: str = "gemini/gemini-3.6-flash"
+    planner_model: str = "groq/openai/gpt-oss-120b"
+    judge_model: str = "gemini/gemini-2.5-flash"
+    generator_model: str = "gemini/gemini-2.5-flash"
     planner_fallback_models: list[str] = Field(
         default_factory=lambda: [
-            "groq/openai/gpt-oss-120b",
-            "gemini/gemini-3.6-flash",
-            "gemini/gemini-3.1-flash-lite",
+            "groq/openai/gpt-oss-20b",
+            "gemini/gemini-2.5-flash",
+            "groq/qwen/qwen3.8-27b",
         ]
     )
     judge_fallback_models: list[str] = Field(
         default_factory=lambda: [
+            "groq/openai/gpt-oss-120b",
+            "groq/openai/gpt-oss-20b",
             "groq/qwen/qwen3.8-27b",
-            "gemini/gemini-3.1-flash-lite",
         ]
     )
     generator_fallback_models: list[str] = Field(
         default_factory=lambda: [
-            "gemini/gemini-3.1-flash-lite",
+            "groq/openai/gpt-oss-120b",
+            "groq/openai/gpt-oss-20b",
             "groq/qwen/qwen3.8-27b",
         ]
     )
@@ -84,7 +97,7 @@ class Settings(BaseSettings):
     max_retrieval_iterations: int = 3
     max_tool_calls: int = 3
     max_latency_ms: int = 30_000
-    max_input_tokens: int = 12_000
+    max_input_tokens: int = 4_500
     max_output_tokens: int = 2_000
     max_estimated_cost_usd: Decimal = Decimal("0.25")
 

@@ -39,4 +39,6 @@ class GraphState(TypedDict):
     guardrail_reason_code: str | None
     session_documents: list[str] | None
     enable_web_search: bool
+    user_id: str | None
+    memory_principal_id: str | None
 

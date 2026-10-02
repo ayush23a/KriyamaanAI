@@ -14,6 +14,7 @@ import {
   UploadingAttachment,
   UserSettings,
 } from '../types';
+import { useAuth } from '@clerk/nextjs';
 import {
   checkHealth,
   createMemory,
@@ -21,11 +22,14 @@ import {
   createSession,
   deleteDocument,
   deleteMemory,
+  deleteSession as deleteRemoteSession,
   getClientCredits,
   getRunEvents,
   getSession,
   listDocuments,
   listMemories,
+  listSessions,
+  setAuthTokenGetter,
   uploadDocument,
 } from '../lib/api';
 import {
@@ -47,6 +51,8 @@ import { MemoryView } from '../components/memory/MemoryView';
 import { SettingsView } from '../components/settings/SettingsView';
 
 export default function AppPage() {
+  const { getToken, isLoaded, isSignedIn, userId } = useAuth();
+
   // Navigation & View
   const [currentView, setCurrentView] = useState<AppNavView>('chat');
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
@@ -67,6 +73,48 @@ export default function AppPage() {
   const [localSessions, setLocalSessions] = useState<LocalSessionMeta[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [sessionTitle, setSessionTitle] = useState<string>('New Research');
+
+  // References to keep active session synchronized and deduplicate concurrent creation
+  const activeSessionIdRef = useRef<string | null>(null);
+  const pendingSessionPromiseRef = useRef<Promise<string> | null>(null);
+
+  useEffect(() => {
+    activeSessionIdRef.current = activeSessionId;
+  }, [activeSessionId]);
+
+  // Ensure an authoritative session exists, reusing any in-flight session creation
+  const ensureSession = useCallback(
+    async (defaultTitle: string = 'New Research'): Promise<string> => {
+      if (activeSessionIdRef.current) {
+        return activeSessionIdRef.current;
+      }
+      if (pendingSessionPromiseRef.current) {
+        return await pendingSessionPromiseRef.current;
+      }
+      const createPromise = (async () => {
+        try {
+          const newSess = await createSession(defaultTitle);
+          activeSessionIdRef.current = newSess.session_id;
+          setActiveSessionId(newSess.session_id);
+          setSessionTitle(newSess.title || defaultTitle);
+          const meta: LocalSessionMeta = {
+            id: newSess.session_id,
+            title: newSess.title || defaultTitle,
+            createdAt: newSess.created_at,
+            updatedAt: newSess.updated_at,
+          };
+          saveLocalSession(meta, userId || undefined);
+          setLocalSessions((prev) => [meta, ...prev.filter((p) => p.id !== meta.id)]);
+          return newSess.session_id;
+        } finally {
+          pendingSessionPromiseRef.current = null;
+        }
+      })();
+      pendingSessionPromiseRef.current = createPromise;
+      return await createPromise;
+    },
+    [userId]
+  );
 
   // Chat Stream State
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
@@ -99,11 +147,65 @@ export default function AppPage() {
     }
   }, []);
 
+  // Wire up token getter as soon as Clerk auth is loaded
+  useEffect(() => {
+    if (isLoaded && isSignedIn) {
+      setAuthTokenGetter(async () => {
+        return await getToken();
+      });
+    }
+  }, [isLoaded, isSignedIn, getToken]);
+
+  // ---------------------------------------------------------------------------
+  // Sync Authenticated Sessions from Server
+  // ---------------------------------------------------------------------------
+  const syncSessions = useCallback(async () => {
+    if (!isLoaded || !isSignedIn) return;
+    try {
+      const serverSessions = await listSessions();
+      const mapped: LocalSessionMeta[] = serverSessions.map((s) => ({
+        id: s.session_id,
+        title: s.title || 'Untitled Session',
+        createdAt: s.created_at,
+        updatedAt: s.updated_at,
+      }));
+      setLocalSessions(mapped);
+      if (mapped.length > 0) {
+        setActiveSessionId((prev) => {
+          if (prev && mapped.some((m) => m.id === prev)) {
+            return prev;
+          }
+          const chosen = activeSessionIdRef.current && mapped.some((m) => m.id === activeSessionIdRef.current)
+            ? activeSessionIdRef.current
+            : mapped[0].id;
+          activeSessionIdRef.current = chosen;
+          return chosen;
+        });
+        setSessionTitle((prev) => {
+          const currentId = activeSessionIdRef.current;
+          const found = mapped.find((m) => m.id === currentId);
+          return found?.title || prev || 'New Research';
+        });
+      } else {
+        // No sessions on server yet
+        activeSessionIdRef.current = null;
+        setActiveSessionId(null);
+        setSessionTitle('New Research');
+        setChatMessages([]);
+        setDocuments([]);
+      }
+    } catch (err) {
+      console.warn('Failed to sync server sessions:', err);
+      const cached = getLocalSessions(userId || undefined);
+      setLocalSessions(cached);
+    }
+  }, [isLoaded, isSignedIn, userId]);
+
   // ---------------------------------------------------------------------------
   // Initial Boot: Load Sessions, Health & Credits
   // ---------------------------------------------------------------------------
   useEffect(() => {
-    // 1. Fetch Health
+    // 1. Fetch Health (public)
     checkHealth()
       .then((h) => setHealth(h))
       .catch(() =>
@@ -114,19 +216,12 @@ export default function AppPage() {
         })
       );
 
-    // 2. Fetch Credits
-    fetchCredits();
-
-    // 3. Load Local Sessions
-    const stored = getLocalSessions();
-    setLocalSessions(stored);
-
-    if (stored.length > 0) {
-      const mostRecent = stored[0];
-      setActiveSessionId(mostRecent.id);
-      setSessionTitle(mostRecent.title || 'Research Workspace');
+    // 2. Fetch user-scoped credits and sessions once Clerk auth is active
+    if (isLoaded && isSignedIn) {
+      fetchCredits();
+      syncSessions();
     }
-  }, [fetchCredits]);
+  }, [isLoaded, isSignedIn, fetchCredits, syncSessions]);
 
   // ---------------------------------------------------------------------------
   // Session Change: Fetch Session Turns, Docs & Memories from Backend
@@ -193,10 +288,10 @@ export default function AppPage() {
   }, []);
 
   useEffect(() => {
-    if (activeSessionId) {
+    if (activeSessionId && isLoaded && isSignedIn) {
       loadSessionData(activeSessionId);
     }
-  }, [activeSessionId, loadSessionData]);
+  }, [activeSessionId, isLoaded, isSignedIn, loadSessionData]);
 
   // ---------------------------------------------------------------------------
   // Create / Switch Sessions
@@ -210,57 +305,61 @@ export default function AppPage() {
         createdAt: newSess.created_at,
         updatedAt: newSess.updated_at,
       };
-      saveLocalSession(meta);
-      setLocalSessions(getLocalSessions());
+      saveLocalSession(meta, userId || undefined);
+      setLocalSessions((prev) => [meta, ...prev.filter((p) => p.id !== meta.id)]);
+      activeSessionIdRef.current = newSess.session_id;
       setActiveSessionId(newSess.session_id);
       setSessionTitle('New Research');
       setChatMessages([]);
+      setDocuments([]);
+      setUploadingAttachments([]);
       setCurrentView('chat');
-    } catch {
-      // Client-side fallback ID if backend is offline
-      const tempId = `sess-${Date.now()}`;
-      const meta: LocalSessionMeta = {
-        id: tempId,
-        title: 'New Research',
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      };
-      saveLocalSession(meta);
-      setLocalSessions(getLocalSessions());
-      setActiveSessionId(tempId);
-      setSessionTitle('New Research');
-      setChatMessages([]);
-      setCurrentView('chat');
+    } catch (err) {
+      console.error('Failed to create session on server:', err);
     }
   };
 
   const handleSelectSession = (id: string) => {
+    if (activeSessionIdRef.current === id) return;
+    activeSessionIdRef.current = id;
     setActiveSessionId(id);
+    setUploadingAttachments([]);
     const item = localSessions.find((s) => s.id === id);
     if (item) setSessionTitle(item.title);
   };
 
-  const handleDeleteSession = (id: string) => {
-    deleteLocalSession(id);
-    const updated = getLocalSessions();
+  const handleDeleteSession = async (id: string) => {
+    deleteLocalSession(id, userId || undefined);
+    const updated = localSessions.filter((s) => s.id !== id);
     setLocalSessions(updated);
-    if (activeSessionId === id) {
+    if (activeSessionIdRef.current === id) {
       if (updated.length > 0) {
+        activeSessionIdRef.current = updated[0].id;
         setActiveSessionId(updated[0].id);
         setSessionTitle(updated[0].title);
       } else {
+        activeSessionIdRef.current = null;
         setActiveSessionId(null);
         setSessionTitle('New Research');
         setChatMessages([]);
+        setDocuments([]);
+        setUploadingAttachments([]);
       }
+    }
+    try {
+      await deleteRemoteSession(id);
+    } catch (err) {
+      console.error('Failed to delete remote session:', err);
     }
   };
 
   const handleUpdateSessionTitle = (newTitle: string) => {
     setSessionTitle(newTitle);
     if (activeSessionId) {
-      updateLocalSessionTitle(activeSessionId, newTitle);
-      setLocalSessions(getLocalSessions());
+      updateLocalSessionTitle(activeSessionId, newTitle, userId || undefined);
+      setLocalSessions((prev) =>
+        prev.map((s) => (s.id === activeSessionId ? { ...s, title: newTitle } : s))
+      );
     }
   };
 
@@ -269,28 +368,11 @@ export default function AppPage() {
   // ---------------------------------------------------------------------------
   const handleSendMessage = async (queryText: string, enableWeb: boolean) => {
     activeAbortRef.current = false;
-    let sessionId = activeSessionId;
+    const titleExcerpt = queryText.length > 32 ? `${queryText.slice(0, 32)}...` : queryText;
+    const sessionId = await ensureSession(titleExcerpt);
 
-    // Create session if none exists
-    if (!sessionId) {
-      try {
-        const titleExcerpt = queryText.length > 32 ? `${queryText.slice(0, 32)}...` : queryText;
-        const newSess = await createSession(titleExcerpt);
-        sessionId = newSess.session_id;
-        const meta: LocalSessionMeta = {
-          id: newSess.session_id,
-          title: titleExcerpt,
-          createdAt: newSess.created_at,
-          updatedAt: newSess.updated_at,
-        };
-        saveLocalSession(meta);
-        setLocalSessions(getLocalSessions());
-        setActiveSessionId(newSess.session_id);
-        setSessionTitle(titleExcerpt);
-      } catch {
-        sessionId = `sess-${Date.now()}`;
-        setActiveSessionId(sessionId);
-      }
+    if (sessionTitle === 'New Research') {
+      handleUpdateSessionTitle(titleExcerpt);
     }
 
     // 1. Append User Message
@@ -395,14 +477,17 @@ export default function AppPage() {
       // Update local storage preview
       if (sessionId) {
         const item = localSessions.find((s) => s.id === sessionId);
-        saveLocalSession({
-          id: sessionId,
-          title: item?.title || (queryText.length > 32 ? `${queryText.slice(0, 32)}...` : queryText),
-          createdAt: item?.createdAt || new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-          previewText: answerText.slice(0, 60),
-        });
-        setLocalSessions(getLocalSessions());
+        saveLocalSession(
+          {
+            id: sessionId,
+            title: item?.title || (queryText.length > 32 ? `${queryText.slice(0, 32)}...` : queryText),
+            createdAt: item?.createdAt || new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+            previewText: answerText.slice(0, 60),
+          },
+          userId || undefined
+        );
+        setLocalSessions(getLocalSessions(userId || undefined));
       }
     } catch (err: unknown) {
       clearInterval(statusInterval);
@@ -475,19 +560,7 @@ export default function AppPage() {
   // Document Operations
   // ---------------------------------------------------------------------------
   const handleUploadDocument = async (file: File) => {
-    let sessId = activeSessionId;
-    if (!sessId) {
-      const newSess = await createSession('Document Ingestion');
-      sessId = newSess.session_id;
-      setActiveSessionId(sessId);
-      saveLocalSession({
-        id: sessId,
-        title: 'Document Ingestion',
-        createdAt: newSess.created_at,
-        updatedAt: newSess.updated_at,
-      });
-      setLocalSessions(getLocalSessions());
-    }
+    const sessId = await ensureSession('New Research');
 
     const attachmentId = `att-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
     const controller = new AbortController();
@@ -514,7 +587,10 @@ export default function AppPage() {
         return;
       }
 
-      setDocuments((prev) => [doc, ...prev]);
+      setDocuments((prev) => {
+        if (prev.some((d) => d.document_id === doc.document_id)) return prev;
+        return [doc, ...prev];
+      });
       setUploadingAttachments((prev) =>
         prev.map((a) =>
           a.id === attachmentId

@@ -159,13 +159,19 @@ class AgentController:
                     )
 
         # Identify if any session document is specifically referenced in the query
-        matched_doc = None
+        matched_docs: list[str] = []
         if session_documents:
             for doc in session_documents:
                 doc_base = doc.lower().rsplit(".", 1)[0]
-                if doc.lower() in lower_q or (len(doc_base) >= 3 and doc_base in lower_q):
-                    matched_doc = doc
-                    break
+                doc_base_clean = re.sub(r"[^a-zA-Z0-9]", "", doc_base)
+                lower_q_clean = re.sub(r"[^a-zA-Z0-9]", "", lower_q)
+                if (
+                    doc.lower() in lower_q
+                    or (len(doc_base) >= 3 and doc_base in lower_q)
+                    or (len(doc_base_clean) >= 3 and doc_base_clean in lower_q_clean)
+                ):
+                    matched_docs.append(doc)
+        matched_doc = matched_docs[0] if len(matched_docs) == 1 else None
 
         # 3. If LLM provider is available, use structured generation
         if self.llm_provider is not None:
@@ -203,11 +209,16 @@ class AgentController:
                         plan.filters = {}
                         return plan
 
-                if matched_doc and plan.action in ["vector_search", "hybrid_search"]:
+                if len(matched_docs) == 1 and plan.action in ["vector_search", "hybrid_search"]:
                     plan.filters = dict(plan.filters)
                     if "document_name" not in plan.filters:
-                        plan.filters["document_name"] = matched_doc
+                        plan.filters["document_name"] = matched_docs[0]
                     plan.top_k = max(plan.top_k, 8)
+                elif len(matched_docs) > 1 and plan.action in ["vector_search", "hybrid_search"]:
+                    plan.filters = dict(plan.filters)
+                    plan.filters.pop("document_name", None)
+                    plan.top_k = max(plan.top_k, 12)
+                    plan.action = "hybrid_search"
                 return plan
             except Exception:
                 pass  # Fallback to default first-pass search
@@ -228,9 +239,11 @@ class AgentController:
         fallback_query = normalized_query
         fallback_filters: dict[str, Any] = {}
         if session_documents:
-            if matched_doc:
-                fallback_query = f"{matched_doc} {normalized_query}"
-                fallback_filters["document_name"] = matched_doc
+            if len(matched_docs) == 1:
+                fallback_query = f"{matched_docs[0]} {normalized_query}"
+                fallback_filters["document_name"] = matched_docs[0]
+            elif len(matched_docs) > 1:
+                fallback_query = f"{' '.join(matched_docs)} {normalized_query}"
             elif any(w in lower_q for w in ["what is this", "what does this", "about this", "summary", "overview", "this document", "this file", "convey", "tell us"]):
                 fallback_query = f"{session_documents[0]} overview summary key details"
 
@@ -238,7 +251,7 @@ class AgentController:
             action="vector_search",
             query=fallback_query,
             filters=fallback_filters,
-            top_k=8 if fallback_filters.get("document_name") else 5,
+            top_k=12 if len(matched_docs) > 1 else (8 if fallback_filters.get("document_name") else 5),
             rerank=True,
             reason_code="first_pass_vector_search",
             expected_information_gain="high",
@@ -264,13 +277,19 @@ class AgentController:
             )
 
         lower_q = query.strip().lower()
-        matched_doc = None
+        matched_docs: list[str] = []
         if session_documents:
             for doc in session_documents:
                 doc_base = doc.lower().rsplit(".", 1)[0]
-                if doc.lower() in lower_q or (len(doc_base) >= 3 and doc_base in lower_q):
-                    matched_doc = doc
-                    break
+                doc_base_clean = re.sub(r"[^a-zA-Z0-9]", "", doc_base)
+                lower_q_clean = re.sub(r"[^a-zA-Z0-9]", "", lower_q)
+                if (
+                    doc.lower() in lower_q
+                    or (len(doc_base) >= 3 and doc_base in lower_q)
+                    or (len(doc_base_clean) >= 3 and doc_base_clean in lower_q_clean)
+                ):
+                    matched_docs.append(doc)
+        matched_doc = matched_docs[0] if len(matched_docs) == 1 else None
 
         # Check memory of past failures
         last_action = None
@@ -349,11 +368,15 @@ class AgentController:
                         return plan
 
                 # Only enforce document_name if it wasn't already tried and deemed insufficient
-                if matched_doc and not last_had_doc_filter and plan.action in ["vector_search", "hybrid_search"]:
+                if len(matched_docs) == 1 and not last_had_doc_filter and plan.action in ["vector_search", "hybrid_search"]:
                     plan.filters = dict(plan.filters)
                     if "document_name" not in plan.filters:
-                        plan.filters["document_name"] = matched_doc
+                        plan.filters["document_name"] = matched_docs[0]
                     plan.top_k = max(plan.top_k, 8)
+                elif len(matched_docs) > 1 and plan.action in ["vector_search", "hybrid_search"]:
+                    plan.filters = dict(plan.filters)
+                    plan.filters.pop("document_name", None)
+                    plan.top_k = max(plan.top_k, 12)
                 return plan
             except Exception:
                 pass  # Fallback to heuristic refinement

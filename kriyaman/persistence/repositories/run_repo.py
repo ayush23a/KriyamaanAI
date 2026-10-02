@@ -22,18 +22,38 @@ class RunRepository:
         )
         return result.scalars().first()
 
+    async def get_by_id_and_user(self, run_id: str, user_id: str) -> RunModel | None:
+        result = await self.session.execute(
+            select(RunModel).where(RunModel.id == run_id).where(RunModel.user_id == user_id)
+        )
+        return result.scalars().first()
+
+    async def list_by_user(
+        self, user_id: str, limit: int = 50, offset: int = 0
+    ) -> Sequence[RunModel]:
+        result = await self.session.execute(
+            select(RunModel)
+            .where(RunModel.user_id == user_id)
+            .order_by(RunModel.created_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        return result.scalars().all()
+
     async def create(
         self,
         session_id: str,
         budgets: dict[str, Any],
         run_id: str | None = None,
         status: str = "running",
+        user_id: str | None = None,
     ) -> RunModel:
         kwargs: dict[str, Any] = {
             "session_id": session_id,
             "status": status,
             "budgets_json": to_json_serializable(budgets) or {},
             "usage_json": {},
+            "user_id": user_id,
         }
         if run_id:
             kwargs["id"] = run_id
@@ -135,6 +155,7 @@ class ToolCallRepository:
         result: dict[str, Any] | None = None,
         status: str = "success",
         latency_ms: int = 0,
+        user_id: str | None = None,
     ) -> ToolCallModel:
         call = ToolCallModel(
             run_id=run_id,
@@ -143,6 +164,7 @@ class ToolCallRepository:
             result_json=to_json_serializable(result) if result is not None else None,
             status=status,
             latency_ms=latency_ms,
+            user_id=user_id,
         )
         self.session.add(call)
         await self.session.flush()

@@ -44,6 +44,7 @@ class RetrievalAgent:
         memory_principal_id: str,
         existing_evidence: list[EvidenceItem] | None = None,
         is_tool_approved: bool = False,
+        user_id: str | None = None,
     ) -> tuple[list[EvidenceItem], list[ToolResult]]:
         """Execute the plan and return newly acquired deduplicated evidence and tool results."""
         new_evidence: list[EvidenceItem] = []
@@ -56,6 +57,8 @@ class RetrievalAgent:
             if self.vector_store is not None:
                 search_filters = dict(plan.filters)
                 search_filters.setdefault("session_id", session_id)
+                if user_id:
+                    search_filters.setdefault("user_id", user_id)
 
                 # Two-stage oversampling: pull wider candidate pool when reranking is active
                 fetch_k = max(plan.top_k * 4, 20) if (plan.rerank and self.reranker is not None) else plan.top_k

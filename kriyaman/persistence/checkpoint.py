@@ -1,4 +1,5 @@
 import random
+import threading
 from collections.abc import AsyncIterator, Iterator, Sequence
 from datetime import datetime, timezone
 from typing import Any
@@ -28,6 +29,7 @@ class PostgresCheckpointSaver(BaseCheckpointSaver):
     def __init__(self, session_factory=None, serde=None):
         super().__init__(serde=serde)
         self._session_factory = session_factory or get_sync_session_factory()
+        self._lock = threading.RLock()
 
     def get_next_version(self, current: str | None, channel: None) -> str:
         if current is None:
@@ -45,12 +47,13 @@ class PostgresCheckpointSaver(BaseCheckpointSaver):
         checkpoint_ns = config["configurable"].get("checkpoint_ns", "")
         checkpoint_id = config["configurable"].get("checkpoint_id")
 
-        with self._session_factory() as session:
-            stmt = (
-                select(LangGraphCheckpointModel)
-                .where(LangGraphCheckpointModel.thread_id == thread_id)
-                .where(LangGraphCheckpointModel.checkpoint_ns == checkpoint_ns)
-            )
+        with self._lock:
+            with self._session_factory() as session:
+                stmt = (
+                    select(LangGraphCheckpointModel)
+                    .where(LangGraphCheckpointModel.thread_id == thread_id)
+                    .where(LangGraphCheckpointModel.checkpoint_ns == checkpoint_ns)
+                )
             if checkpoint_id:
                 stmt = stmt.where(LangGraphCheckpointModel.checkpoint_id == checkpoint_id)
             else:
@@ -180,65 +183,66 @@ class PostgresCheckpointSaver(BaseCheckpointSaver):
         c_type, c_data = self.serde.dumps_typed(c)
         meta_type, meta_data = self.serde.dumps_typed(get_checkpoint_metadata(config, metadata))
 
-        with self._session_factory() as session:
-            with session.begin():
-                with session.no_autoflush:
-                    # 1. Upsert Blobs for new versions
-                    for channel, version in new_versions.items():
-                        if channel in values:
-                            b_type, b_data = self.serde.dumps_typed(values[channel])
-                        else:
-                            b_type, b_data = ("empty", b"")
+        with self._lock:
+            with self._session_factory() as session:
+                with session.begin():
+                    with session.no_autoflush:
+                        # 1. Upsert Blobs for new versions
+                        for channel, version in new_versions.items():
+                            if channel in values:
+                                b_type, b_data = self.serde.dumps_typed(values[channel])
+                            else:
+                                b_type, b_data = ("empty", b"")
 
-                        existing_blob = session.execute(
-                            select(LangGraphBlobModel)
-                            .where(LangGraphBlobModel.thread_id == thread_id)
-                            .where(LangGraphBlobModel.checkpoint_ns == checkpoint_ns)
-                            .where(LangGraphBlobModel.channel == channel)
-                            .where(LangGraphBlobModel.version == str(version))
+                            existing_blob = session.execute(
+                                select(LangGraphBlobModel)
+                                .where(LangGraphBlobModel.thread_id == thread_id)
+                                .where(LangGraphBlobModel.checkpoint_ns == checkpoint_ns)
+                                .where(LangGraphBlobModel.channel == channel)
+                                .where(LangGraphBlobModel.version == str(version))
+                            ).scalars().first()
+
+                            if existing_blob:
+                                existing_blob.type = b_type
+                                existing_blob.blob_data = b_data
+                            else:
+                                blob_obj = LangGraphBlobModel(
+                                    thread_id=thread_id,
+                                    checkpoint_ns=checkpoint_ns,
+                                    channel=channel,
+                                    version=str(version),
+                                    type=b_type,
+                                    blob_data=b_data,
+                                )
+                                session.add(blob_obj)
+
+                        # 2. Upsert Checkpoint row
+                        existing_cp = session.execute(
+                            select(LangGraphCheckpointModel)
+                            .where(LangGraphCheckpointModel.thread_id == thread_id)
+                            .where(LangGraphCheckpointModel.checkpoint_ns == checkpoint_ns)
+                            .where(LangGraphCheckpointModel.checkpoint_id == checkpoint_id)
                         ).scalars().first()
 
-                        if existing_blob:
-                            existing_blob.type = b_type
-                            existing_blob.blob_data = b_data
+                        if existing_cp:
+                            existing_cp.parent_checkpoint_id = parent_checkpoint_id
+                            existing_cp.type = c_type
+                            existing_cp.checkpoint_data = c_data
+                            existing_cp.metadata_type = meta_type
+                            existing_cp.metadata_data = meta_data
                         else:
-                            blob_obj = LangGraphBlobModel(
+                            cp_obj = LangGraphCheckpointModel(
                                 thread_id=thread_id,
                                 checkpoint_ns=checkpoint_ns,
-                                channel=channel,
-                                version=str(version),
-                                type=b_type,
-                                blob_data=b_data,
+                                checkpoint_id=checkpoint_id,
+                                parent_checkpoint_id=parent_checkpoint_id,
+                                type=c_type,
+                                checkpoint_data=c_data,
+                                metadata_type=meta_type,
+                                metadata_data=meta_data,
+                                created_at=datetime.now(timezone.utc),
                             )
-                            session.add(blob_obj)
-
-                    # 2. Upsert Checkpoint row
-                    existing_cp = session.execute(
-                        select(LangGraphCheckpointModel)
-                        .where(LangGraphCheckpointModel.thread_id == thread_id)
-                        .where(LangGraphCheckpointModel.checkpoint_ns == checkpoint_ns)
-                        .where(LangGraphCheckpointModel.checkpoint_id == checkpoint_id)
-                    ).scalars().first()
-
-                    if existing_cp:
-                        existing_cp.parent_checkpoint_id = parent_checkpoint_id
-                        existing_cp.type = c_type
-                        existing_cp.checkpoint_data = c_data
-                        existing_cp.metadata_type = meta_type
-                        existing_cp.metadata_data = meta_data
-                    else:
-                        cp_obj = LangGraphCheckpointModel(
-                            thread_id=thread_id,
-                            checkpoint_ns=checkpoint_ns,
-                            checkpoint_id=checkpoint_id,
-                            parent_checkpoint_id=parent_checkpoint_id,
-                            type=c_type,
-                            checkpoint_data=c_data,
-                            metadata_type=meta_type,
-                            metadata_data=meta_data,
-                            created_at=datetime.now(timezone.utc),
-                        )
-                        session.add(cp_obj)
+                            session.add(cp_obj)
 
         return {
             "configurable": {
@@ -259,53 +263,55 @@ class PostgresCheckpointSaver(BaseCheckpointSaver):
         checkpoint_ns = config["configurable"].get("checkpoint_ns", "")
         checkpoint_id = config["configurable"]["checkpoint_id"]
 
-        with self._session_factory() as session:
-            with session.begin():
-                with session.no_autoflush:
-                    for idx, (channel, val) in enumerate(writes):
-                        write_idx = WRITES_IDX_MAP.get(channel, idx)
-                        v_type, v_data = self.serde.dumps_typed(val)
+        with self._lock:
+            with self._session_factory() as session:
+                with session.begin():
+                    with session.no_autoflush:
+                        for idx, (channel, val) in enumerate(writes):
+                            write_idx = WRITES_IDX_MAP.get(channel, idx)
+                            v_type, v_data = self.serde.dumps_typed(val)
 
-                        existing = session.execute(
-                            select(LangGraphWriteModel)
-                            .where(LangGraphWriteModel.thread_id == thread_id)
-                            .where(LangGraphWriteModel.checkpoint_ns == checkpoint_ns)
-                            .where(LangGraphWriteModel.checkpoint_id == checkpoint_id)
-                            .where(LangGraphWriteModel.task_id == task_id)
-                            .where(LangGraphWriteModel.idx == write_idx)
-                        ).scalars().first()
+                            existing = session.execute(
+                                select(LangGraphWriteModel)
+                                .where(LangGraphWriteModel.thread_id == thread_id)
+                                .where(LangGraphWriteModel.checkpoint_ns == checkpoint_ns)
+                                .where(LangGraphWriteModel.checkpoint_id == checkpoint_id)
+                                .where(LangGraphWriteModel.task_id == task_id)
+                                .where(LangGraphWriteModel.idx == write_idx)
+                            ).scalars().first()
 
-                        if existing:
-                            existing.channel = channel
-                            existing.type = v_type
-                            existing.value_data = v_data
-                            existing.task_path = task_path
-                        else:
-                            write_obj = LangGraphWriteModel(
-                                thread_id=thread_id,
-                                checkpoint_ns=checkpoint_ns,
-                                checkpoint_id=checkpoint_id,
-                            task_id=task_id,
-                            idx=write_idx,
-                            channel=channel,
-                            type=v_type,
-                            value_data=v_data,
-                            task_path=task_path,
-                        )
-                        session.add(write_obj)
+                            if existing:
+                                existing.channel = channel
+                                existing.type = v_type
+                                existing.value_data = v_data
+                                existing.task_path = task_path
+                            else:
+                                write_obj = LangGraphWriteModel(
+                                    thread_id=thread_id,
+                                    checkpoint_ns=checkpoint_ns,
+                                    checkpoint_id=checkpoint_id,
+                                    task_id=task_id,
+                                    idx=write_idx,
+                                    channel=channel,
+                                    type=v_type,
+                                    value_data=v_data,
+                                    task_path=task_path,
+                                )
+                                session.add(write_obj)
 
     def delete_thread(self, thread_id: str) -> None:
-        with self._session_factory() as session:
-            with session.begin():
-                session.execute(
-                    delete(LangGraphCheckpointModel).where(LangGraphCheckpointModel.thread_id == thread_id)
-                )
-                session.execute(
-                    delete(LangGraphBlobModel).where(LangGraphBlobModel.thread_id == thread_id)
-                )
-                session.execute(
-                    delete(LangGraphWriteModel).where(LangGraphWriteModel.thread_id == thread_id)
-                )
+        with self._lock:
+            with self._session_factory() as session:
+                with session.begin():
+                    session.execute(
+                        delete(LangGraphCheckpointModel).where(LangGraphCheckpointModel.thread_id == thread_id)
+                    )
+                    session.execute(
+                        delete(LangGraphBlobModel).where(LangGraphBlobModel.thread_id == thread_id)
+                    )
+                    session.execute(
+                        delete(LangGraphWriteModel).where(LangGraphWriteModel.thread_id == thread_id)
+                    )
 
     async def aget_tuple(self, config: RunnableConfig) -> CheckpointTuple | None:
         return self.get_tuple(config)

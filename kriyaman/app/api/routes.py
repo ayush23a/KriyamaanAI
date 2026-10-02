@@ -32,6 +32,7 @@ from app.api.schemas import (
 )
 from app.dependencies import (
     get_cache_adapter,
+    get_current_user,
     get_db,
     get_embedding_provider,
     get_ingestion_service,
@@ -53,6 +54,7 @@ from domain.errors import (
     ResourceNotFoundError,
     ValidationError,
 )
+from persistence.models import UserModel
 from persistence.repositories.chunk_repo import DocumentChunkRepository
 from persistence.repositories.credit_repo import ClientCreditRepository
 from persistence.repositories.document_repo import DocumentRepository
@@ -137,7 +139,7 @@ async def test_api_keys(
         t0 = time.time()
         try:
             await litellm.acompletion(
-                model="gemini/gemini-3.6-flash",
+                model=settings.llm_model,
                 messages=[{"role": "user", "content": "ping"}],
                 api_key=request.gemini_api_key.strip(),
                 max_tokens=1,
@@ -146,7 +148,7 @@ async def test_api_keys(
             lat = int((time.time() - t0) * 1000)
             response.gemini = ProviderKeyStatus(
                 valid=True,
-                message="Connected to Gemini 3.6 Flash.",
+                message=f"Connected to {settings.llm_model}.",
                 latency_ms=lat,
             )
         except Exception as e:
@@ -260,13 +262,12 @@ async def test_api_keys(
     summary="Get client cumulative usage and remaining credit",
 )
 async def get_client_credits(
+    current_user: Annotated[UserModel, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
     settings: Annotated[Settings, Depends(get_settings)],
-    x_client_id: Annotated[str | None, Header()] = None,
 ) -> ClientCreditResponse:
-    client_id = x_client_id or "default_client"
     credit_repo = ClientCreditRepository(db)
-    record = await credit_repo.get_or_create(client_id)
+    record = await credit_repo.get_by_user_id(current_user.id, default_limit=settings.client_free_credit_usd)
     remaining = max(0.0, round(record.credit_limit_usd - record.default_spent_usd, 4))
     is_capped = (
         (record.default_spent_usd >= record.credit_limit_usd)
@@ -292,23 +293,25 @@ async def get_client_credits(
     "/sessions",
     response_model=SessionResponse,
     status_code=status.HTTP_201_CREATED,
-    summary="Create an anonymous session",
+    summary="Create an authenticated user session",
 )
 async def create_session(
     request: SessionCreateRequest,
+    current_user: Annotated[UserModel, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> SessionResponse:
     principal_repo = MemoryPrincipalRepository(db)
     session_repo = SessionRepository(db)
 
-    # Ensure anonymous principal exists or create one
-    namespace_key = f"anon_{uuid.uuid4().hex[:12]}"
-    principal = await principal_repo.get_or_create(namespace_key=namespace_key)
+    # Ensure user memory principal exists
+    namespace_key = f"user_{current_user.id}"
+    principal = await principal_repo.get_or_create(namespace_key=namespace_key, kind="user")
 
     new_session = await session_repo.create(
         memory_principal_id=principal.id,
         title=request.title,
         metadata=request.metadata,
+        user_id=current_user.id,
     )
     await db.commit()
 
@@ -323,18 +326,43 @@ async def create_session(
 
 
 @router.get(
+    "/sessions",
+    response_model=list[SessionResponse],
+    summary="List sessions belonging to authenticated user",
+)
+async def list_sessions(
+    current_user: Annotated[UserModel, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> list[SessionResponse]:
+    session_repo = SessionRepository(db)
+    sessions = await session_repo.list_by_user(current_user.id)
+    return [
+        SessionResponse(
+            session_id=s.id,
+            memory_principal_id=s.memory_principal_id,
+            title=s.title,
+            created_at=s.created_at,
+            updated_at=s.updated_at,
+            metadata=s.metadata_json or {},
+        )
+        for s in sessions
+    ]
+
+
+@router.get(
     "/sessions/{session_id}",
     response_model=SessionDetailResponse,
     summary="Session summary and recent turns",
 )
 async def get_session(
     session_id: str,
+    current_user: Annotated[UserModel, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> SessionDetailResponse:
     session_repo = SessionRepository(db)
     turn_repo = ConversationTurnRepository(db)
 
-    session = await session_repo.get_by_id(session_id)
+    session = await session_repo.get_by_id_and_user(session_id, current_user.id)
     if not session:
         raise ResourceNotFoundError(
             f"Session '{session_id}' not found.", resource_type="session", resource_id=session_id
@@ -373,6 +401,30 @@ async def get_session(
     )
 
 
+@router.delete(
+    "/sessions/{session_id}",
+    response_model=GenericActionResponse,
+    summary="Delete a session belonging to authenticated user",
+)
+async def delete_session(
+    session_id: str,
+    current_user: Annotated[UserModel, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> GenericActionResponse:
+    session_repo = SessionRepository(db)
+    deleted = await session_repo.delete_for_user(session_id, current_user.id)
+    if not deleted:
+        raise ResourceNotFoundError(
+            f"Session '{session_id}' not found.", resource_type="session", resource_id=session_id
+        )
+    await db.commit()
+    return GenericActionResponse(
+        success=True,
+        message=f"Session '{session_id}' deleted successfully.",
+        id=session_id,
+    )
+
+
 # ---------------------------------------------------------------------------
 # 3. Run Endpoints
 # ---------------------------------------------------------------------------
@@ -386,16 +438,23 @@ async def get_session(
 async def create_run(
     session_id: str,
     request: RunCreateRequest,
+    current_user: Annotated[UserModel, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
     run_service: Annotated[RunExecutionService, Depends(get_run_service)],
-    x_client_id: Annotated[str | None, Header()] = None,
     x_key_mode: Annotated[str | None, Header()] = None,
     x_gemini_api_key: Annotated[str | None, Header()] = None,
     x_groq_api_key: Annotated[str | None, Header()] = None,
     x_groq_secondary_api_key: Annotated[str | None, Header()] = None,
     x_tavily_api_key: Annotated[str | None, Header()] = None,
 ) -> RunResponse:
-    client_id = x_client_id or session_id
+    session_repo = SessionRepository(db)
+    session = await session_repo.get_by_id_and_user(session_id, current_user.id)
+    if not session:
+        raise ResourceNotFoundError(
+            f"Session '{session_id}' not found.", resource_type="session", resource_id=session_id
+        )
+
+    client_id = current_user.id
     credit_repo = ClientCreditRepository(db)
     is_byok = (x_key_mode or "").lower() == "byok"
 
@@ -428,7 +487,7 @@ async def create_run(
             custom_web = WebSearchAdapter(
                 google_api_key=gemini_k,
                 tavily_api_key=tavily_k,
-                model_name="gemini-3.6-flash",
+                model_name=settings.gemini_model_name.replace("gemini/", ""),
                 offline_fallback=MockWebSearchAdapter(),
             )
     else:
@@ -452,13 +511,14 @@ async def create_run(
         enable_web_search=request.enable_web_search,
         llm_provider=custom_llm,
         web_search=custom_web,
+        user_id=current_user.id,
     )
 
     # Record usage in credit repository
     run_usage = result.get("state", {}).get("usage")
     if run_usage:
         cost = float(getattr(run_usage, "estimated_cost_usd", 0.0) or 0.0)
-        await credit_repo.record_usage(client_id, cost, is_byok=is_byok)
+        await credit_repo.record_usage(client_id, cost, is_byok=is_byok, user_id=current_user.id)
         await db.commit()
 
     run_id = result["run_id"]
@@ -522,10 +582,11 @@ async def create_run(
 )
 async def get_run(
     run_id: str,
+    current_user: Annotated[UserModel, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> RunResponse:
     run_repo = RunRepository(db)
-    turn_repo = ConversationTurnRepository(db)
+    session_repo = SessionRepository(db)
 
     run = await run_repo.get_by_id(run_id)
     if not run:
@@ -533,9 +594,20 @@ async def get_run(
             f"Run '{run_id}' not found.", resource_type="run", resource_id=run_id
         )
 
+    if run.user_id:
+        if run.user_id != current_user.id:
+            raise ResourceNotFoundError(
+                f"Run '{run_id}' not found.", resource_type="run", resource_id=run_id
+            )
+    else:
+        session = await session_repo.get_by_id_and_user(run.session_id, current_user.id)
+        if not session:
+            raise ResourceNotFoundError(
+                f"Run '{run_id}' not found.", resource_type="run", resource_id=run_id
+            )
+
     answer_resp = None
     if run.status in ["answer", "completed", "clarification", "abstention"]:
-        # Find turn associated with this run
         from sqlalchemy import select
         from persistence.models import ConversationTurnModel
         res = await db.execute(
@@ -571,8 +643,30 @@ async def get_run(
 async def get_run_events(
     run_id: str,
     request: Request,
+    current_user: Annotated[UserModel, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
+    run_repo = RunRepository(db)
+    session_repo = SessionRepository(db)
+
+    run = await run_repo.get_by_id(run_id)
+    if not run:
+        raise ResourceNotFoundError(
+            f"Run '{run_id}' not found.", resource_type="run", resource_id=run_id
+        )
+
+    if run.user_id:
+        if run.user_id != current_user.id:
+            raise ResourceNotFoundError(
+                f"Run '{run_id}' not found.", resource_type="run", resource_id=run_id
+            )
+    else:
+        session = await session_repo.get_by_id_and_user(run.session_id, current_user.id)
+        if not session:
+            raise ResourceNotFoundError(
+                f"Run '{run_id}' not found.", resource_type="run", resource_id=run_id
+            )
+
     event_repo = RunEventRepository(db)
     events = await event_repo.list_by_run(run_id)
 
@@ -618,11 +712,12 @@ async def get_run_events(
 async def upload_document(
     session_id: str,
     file: Annotated[UploadFile, File(...)],
+    current_user: Annotated[UserModel, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
     ingestion_service: Annotated[IngestionService, Depends(get_ingestion_service)],
 ) -> DocumentResponse:
     session_repo = SessionRepository(db)
-    session = await session_repo.get_by_id(session_id)
+    session = await session_repo.get_by_id_and_user(session_id, current_user.id)
     if not session:
         raise ResourceNotFoundError(
             f"Session '{session_id}' not found.", resource_type="session", resource_id=session_id
@@ -638,6 +733,7 @@ async def upload_document(
         session_id=session_id,
         filename=filename,
         content=content,
+        user_id=current_user.id,
     )
     await db.commit()
 
@@ -660,10 +756,18 @@ async def upload_document(
 )
 async def list_documents(
     session_id: str,
+    current_user: Annotated[UserModel, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> DocumentListResponse:
+    session_repo = SessionRepository(db)
+    session = await session_repo.get_by_id_and_user(session_id, current_user.id)
+    if not session:
+        raise ResourceNotFoundError(
+            f"Session '{session_id}' not found.", resource_type="session", resource_id=session_id
+        )
+
     doc_repo = DocumentRepository(db)
-    docs = await doc_repo.list_by_session(session_id)
+    docs = await doc_repo.list_by_session(session_id, user_id=current_user.id)
 
     return DocumentListResponse(
         documents=[
@@ -688,12 +792,13 @@ async def list_documents(
 )
 async def delete_document(
     document_id: str,
+    current_user: Annotated[UserModel, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> GenericActionResponse:
     doc_repo = DocumentRepository(db)
     chunk_repo = DocumentChunkRepository(db)
 
-    doc = await doc_repo.get_by_id(document_id)
+    doc = await doc_repo.get_by_id_and_user(document_id, current_user.id)
     if not doc:
         raise ResourceNotFoundError(
             f"Document '{document_id}' not found.", resource_type="document", resource_id=document_id
@@ -723,12 +828,13 @@ async def delete_document(
 async def create_memory(
     session_id: str,
     request: MemoryCreateRequest,
+    current_user: Annotated[UserModel, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> MemoryResponse:
     session_repo = SessionRepository(db)
     memory_repo = MemoryRepository(db)
 
-    session = await session_repo.get_by_id(session_id)
+    session = await session_repo.get_by_id_and_user(session_id, current_user.id)
     if not session:
         raise ResourceNotFoundError(
             f"Session '{session_id}' not found.", resource_type="session", resource_id=session_id
@@ -748,6 +854,7 @@ async def create_memory(
         kind=request.kind,
         content=request.content,
         embedding=embedding,
+        user_id=current_user.id,
     )
     await db.commit()
 
@@ -768,18 +875,19 @@ async def create_memory(
 )
 async def list_memories(
     session_id: str,
+    current_user: Annotated[UserModel, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> MemoryListResponse:
     session_repo = SessionRepository(db)
     memory_repo = MemoryRepository(db)
 
-    session = await session_repo.get_by_id(session_id)
+    session = await session_repo.get_by_id_and_user(session_id, current_user.id)
     if not session:
         raise ResourceNotFoundError(
             f"Session '{session_id}' not found.", resource_type="session", resource_id=session_id
         )
 
-    memories = await memory_repo.list_by_principal(session.memory_principal_id)
+    memories = await memory_repo.list_by_principal(session.memory_principal_id, user_id=current_user.id)
     return MemoryListResponse(
         memories=[
             MemoryResponse(
@@ -802,11 +910,12 @@ async def list_memories(
 )
 async def delete_memory(
     memory_id: str,
+    current_user: Annotated[UserModel, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> GenericActionResponse:
     memory_repo = MemoryRepository(db)
 
-    memory = await memory_repo.get_by_id(memory_id)
+    memory = await memory_repo.get_by_id_and_user(memory_id, current_user.id)
     if not memory:
         raise ResourceNotFoundError(
             f"Memory '{memory_id}' not found.", resource_type="memory", resource_id=memory_id

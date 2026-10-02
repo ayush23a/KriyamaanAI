@@ -11,7 +11,7 @@ class ClientCreditRepository:
         self.session = session
 
     async def get_or_create(
-        self, client_id: str, default_limit: float = 5.0, for_update: bool = False
+        self, client_id: str, default_limit: float = 5.0, for_update: bool = False, user_id: str | None = None
     ) -> ClientCreditModel:
         stmt = select(ClientCreditModel).where(ClientCreditModel.client_id == client_id)
         if for_update:
@@ -21,6 +21,7 @@ class ClientCreditRepository:
         if not record:
             record = ClientCreditModel(
                 client_id=client_id,
+                user_id=user_id,
                 key_mode="default",
                 default_spent_usd=0.0,
                 byok_spent_usd=0.0,
@@ -28,12 +29,26 @@ class ClientCreditRepository:
             )
             self.session.add(record)
             await self.session.flush()
+        elif user_id and not record.user_id:
+            record.user_id = user_id
+            await self.session.flush()
+        return record
+
+    async def get_by_user_id(
+        self, user_id: str, default_limit: float = 5.0
+    ) -> ClientCreditModel:
+        result = await self.session.execute(
+            select(ClientCreditModel).where(ClientCreditModel.user_id == user_id)
+        )
+        record = result.scalars().first()
+        if not record:
+            return await self.get_or_create(client_id=user_id, default_limit=default_limit, user_id=user_id)
         return record
 
     async def record_usage(
-        self, client_id: str, cost_usd: float, is_byok: bool = False
+        self, client_id: str, cost_usd: float, is_byok: bool = False, user_id: str | None = None
     ) -> ClientCreditModel:
-        record = await self.get_or_create(client_id, for_update=True)
+        record = await self.get_or_create(client_id, for_update=True, user_id=user_id)
         if is_byok:
             record.byok_spent_usd = round(record.byok_spent_usd + cost_usd, 6)
             record.key_mode = "byok"

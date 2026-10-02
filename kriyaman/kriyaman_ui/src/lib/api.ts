@@ -12,6 +12,27 @@ import {
 } from '../types';
 import { getClientId, getUserSettings } from './storage';
 
+let authTokenGetter: (() => Promise<string | null>) | null = null;
+
+export function setAuthTokenGetter(getter: () => Promise<string | null>) {
+  authTokenGetter = getter;
+}
+
+export async function getAuthToken(): Promise<string | null> {
+  if (authTokenGetter) {
+    try {
+      const token = await authTokenGetter();
+      if (token) return token;
+    } catch {}
+  }
+  if (typeof window !== 'undefined' && (window as any).Clerk?.session) {
+    try {
+      return await (window as any).Clerk.session.getToken();
+    } catch {}
+  }
+  return null;
+}
+
 export function getApiBaseUrl(): string {
   if (typeof window !== 'undefined') {
     const custom = localStorage.getItem('kriyaman_api_base_url');
@@ -33,6 +54,12 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
   const headers = new Headers(options.headers || {});
   if (!headers.has('Accept')) {
     headers.set('Accept', 'application/json');
+  }
+
+  // Inject Bearer token from Clerk if available
+  const token = await getAuthToken();
+  if (token) {
+    headers.set('Authorization', `Bearer ${token}`);
   }
 
   // Inject Client ID and BYOK headers if available in browser
@@ -97,6 +124,20 @@ export async function getSession(sessionId: string): Promise<SessionDetail> {
   return request<SessionDetail>(`/sessions/${encodeURIComponent(sessionId)}`);
 }
 
+export async function listSessions(): Promise<Session[]> {
+  const data = await request<Session[] | { sessions: Session[] }>('/sessions');
+  if (Array.isArray(data)) {
+    return data;
+  }
+  return (data as any)?.sessions || [];
+}
+
+export async function deleteSession(sessionId: string): Promise<{ success: boolean }> {
+  return request<{ success: boolean }>(`/sessions/${encodeURIComponent(sessionId)}`, {
+    method: 'DELETE',
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Runs & Events
 // ---------------------------------------------------------------------------
@@ -139,8 +180,19 @@ export async function uploadDocument(sessionId: string, file: File, signal?: Abo
   const formData = new FormData();
   formData.append('file', file);
 
+  const headers = new Headers();
+  const token = await getAuthToken();
+  if (token) {
+    headers.set('Authorization', `Bearer ${token}`);
+  }
+  if (typeof window !== 'undefined') {
+    const clientId = getClientId();
+    headers.set('X-Client-Id', clientId);
+  }
+
   const response = await fetch(url, {
     method: 'POST',
+    headers,
     body: formData,
     signal,
   });
