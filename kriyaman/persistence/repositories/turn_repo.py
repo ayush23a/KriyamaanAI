@@ -18,6 +18,7 @@ class ConversationTurnRepository:
         user_query: str,
         answer: dict[str, Any] | None = None,
         status: str = "completed",
+        user_id: str | None = None,
     ) -> ConversationTurnModel:
         turn = ConversationTurnModel(
             session_id=session_id,
@@ -25,6 +26,7 @@ class ConversationTurnRepository:
             user_query=user_query,
             answer_json=to_json_serializable(answer),
             status=status,
+            user_id=user_id,
         )
         self.session.add(turn)
         await self.session.flush()

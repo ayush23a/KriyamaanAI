@@ -259,9 +259,10 @@ class GraphNodes:
             plan=plan,
             session_id=state["session_id"],
             run_id=state["run_id"],
-            memory_principal_id="anonymous",
+            memory_principal_id=state.get("memory_principal_id") or "anonymous",
             existing_evidence=state.get("evidence", []),
             is_tool_approved=False,
+            user_id=state.get("user_id"),
         )
 
         event = ExecutionEvent(

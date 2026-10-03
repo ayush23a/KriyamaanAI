@@ -58,9 +58,9 @@ class LiteLLMGatewayAdapter(LLMProvider):
         google_api_key: str = "",
         groq_api_key: str = "",
         groq_api_key_secondary: str = "",
-        planner_model: str = "groq/qwen/qwen3.8-27b",
-        judge_model: str = "gemini/gemini-3.6-flash",
-        generator_model: str = "gemini/gemini-3.6-flash",
+        planner_model: str = "groq/openai/gpt-oss-120b",
+        judge_model: str = "gemini/gemini-2.5-flash",
+        generator_model: str = "gemini/gemini-2.5-flash",
         planner_fallback_models: list[str] | None = None,
         judge_fallback_models: list[str] | None = None,
         generator_fallback_models: list[str] | None = None,
@@ -76,16 +76,18 @@ class LiteLLMGatewayAdapter(LLMProvider):
         self.judge_model = judge_model
         self.generator_model = generator_model
         self.planner_fallback_models = planner_fallback_models or [
-            "groq/openai/gpt-oss-120b",
-            "gemini/gemini-3.6-flash",
-            "gemini/gemini-3.1-flash-lite",
+            "groq/openai/gpt-oss-20b",
+            "gemini/gemini-2.5-flash",
+            "groq/qwen/qwen3.8-27b",
         ]
         self.judge_fallback_models = judge_fallback_models or [
+            "groq/openai/gpt-oss-120b",
+            "groq/openai/gpt-oss-20b",
             "groq/qwen/qwen3.8-27b",
-            "gemini/gemini-3.1-flash-lite",
         ]
         self.generator_fallback_models = generator_fallback_models or [
-            "gemini/gemini-3.1-flash-lite",
+            "groq/openai/gpt-oss-120b",
+            "groq/openai/gpt-oss-20b",
             "groq/qwen/qwen3.8-27b",
         ]
         self.temperature = temperature
@@ -135,7 +137,7 @@ class LiteLLMGatewayAdapter(LLMProvider):
 
     def _get_api_keys_for_model(self, model: str) -> list[str]:
         model_lower = model.lower()
-        if "groq" in model_lower or "qwen" in model_lower:
+        if "groq" in model_lower or "qwen" in model_lower or "gpt-oss" in model_lower:
             key1 = self.groq_api_key or os.environ.get("GROQ_API_KEY") or os.environ.get("GROQ_API_KEY_1", "")
             key2 = self.groq_api_key_secondary or os.environ.get("GROQ_API_KEY_SECONDARY") or os.environ.get("GROQ_API_KEY_2", "")
             # If model is qwen and key2 is present, prioritize key2

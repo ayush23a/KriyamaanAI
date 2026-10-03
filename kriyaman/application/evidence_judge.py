@@ -141,11 +141,16 @@ Evaluate the retrieved evidence against the user query.
 Assess claim coverage, quality, conflicts, and provenance.
 
 Decisions allowed:
-- 'sufficient': Evidence covers user query; ready for generation.
-- 'insufficient': Evidence is missing key aspects; more retrieval needed if budget permits.
+- 'sufficient': Evidence covers user query; ready for generation. If retrieved evidence contains relevant factual material, rules, or document excerpts addressing the query, decide 'sufficient' so the answer generator can synthesize from the evidence.
+- 'insufficient': Evidence is missing critical aspects; more retrieval needed if budget permits.
 - 'conflicting': Evidence contains direct contradictions between sources.
 - 'clarification': Query is inherently ambiguous and cannot be answered without user input.
 - 'abstain': Evidence is completely absent or query is unsupported.
+
+Guidelines:
+- When documents are uploaded and excerpts from them are retrieved, decide 'sufficient' if the passages provide substantive factual context to answer or explain what the documents state. Do not require outside information if the documents provide the direct answers.
+- When the user asks about specific forms, tax schedules, or files that they uploaded, and the retrieved evidence contains substantive excerpts from those files (such as their titles, instructions, calculations, or conditions), decide 'sufficient'. Do NOT mark evidence 'insufficient' simply because the document itself does not contain exhaustive external legal statutes or external tax advice. The generation engine will answer based on what the documents state.
+- Only decide 'insufficient' or 'abstain' when the query cannot be addressed at all from the available evidence.
 
 Return structured EvidenceAssessment."""
 
@@ -261,6 +266,16 @@ class EvidenceJudge:
                         m for m in assessment.missing_aspects
                         if m.lower() not in STOPWORDS and len(m) > 2
                     ]
+                if (
+                    retrieval_iterations >= max_iterations
+                    and assessment.decision == "insufficient"
+                    and evidence
+                    and len(evidence) >= 2
+                    and any((e.retrieval_score or 0.0) >= 0.50 for e in evidence)
+                ):
+                    assessment.decision = "sufficient"
+                    assessment.reason_code = "budget_reached_sufficient_evidence_for_synthesis"
+
                 return assessment
             except Exception:
                 pass  # Fallback to heuristic evaluation
@@ -310,7 +325,11 @@ class EvidenceJudge:
         # 2. Advantages / Strengths intent
         if intent == "advantages":
             has_advantage_term = any(kw in total_content for kw in ADVANTAGE_KEYWORDS)
-            has_good_score = any(e.retrieval_score and e.retrieval_score >= 0.70 for e in evidence)
+            has_good_score = any(
+                (e.retrieval_score and e.retrieval_score >= 0.50)
+                or (getattr(e, "rerank_score", None) and e.rerank_score >= 0.50)
+                for e in evidence
+            )
             if has_advantage_term or has_good_score:
                 return EvidenceAssessment(
                     decision="sufficient",
@@ -347,7 +366,11 @@ class EvidenceJudge:
         # 3. Limitations / Weaknesses intent
         if intent == "limitations":
             has_limitation_term = any(kw in total_content for kw in LIMITATION_KEYWORDS)
-            has_good_score = any(e.retrieval_score and e.retrieval_score >= 0.70 for e in evidence)
+            has_good_score = any(
+                (e.retrieval_score and e.retrieval_score >= 0.50)
+                or (getattr(e, "rerank_score", None) and e.rerank_score >= 0.50)
+                for e in evidence
+            )
             if has_limitation_term or has_good_score:
                 return EvidenceAssessment(
                     decision="sufficient",
@@ -384,7 +407,11 @@ class EvidenceJudge:
         # 4. Findings / Conclusions intent
         if intent == "findings":
             has_finding_term = any(kw in total_content for kw in FINDING_KEYWORDS)
-            has_good_score = any(e.retrieval_score and e.retrieval_score >= 0.70 for e in evidence)
+            has_good_score = any(
+                (e.retrieval_score and e.retrieval_score >= 0.50)
+                or (getattr(e, "rerank_score", None) and e.rerank_score >= 0.50)
+                for e in evidence
+            )
             if has_finding_term or has_good_score:
                 return EvidenceAssessment(
                     decision="sufficient",
@@ -427,7 +454,11 @@ class EvidenceJudge:
             }
             has_multi_source = len(unique_sources) >= 2
             has_synthesis_term = any(kw in total_content for kw in SYNTHESIS_KEYWORDS)
-            has_good_score = any(e.retrieval_score and e.retrieval_score >= 0.70 for e in evidence)
+            has_good_score = any(
+                (e.retrieval_score and e.retrieval_score >= 0.50)
+                or (getattr(e, "rerank_score", None) and e.rerank_score >= 0.50)
+                for e in evidence
+            )
             if has_multi_source or has_synthesis_term or has_good_score:
                 return EvidenceAssessment(
                     decision="sufficient",

@@ -17,6 +17,7 @@ from domain.ports.cache import CachePort
 from domain.ports.embeddings import EmbeddingProvider
 from domain.ports.llm import LLMProvider
 from domain.ports.reranker import Reranker
+from domain.ports.tools import ToolRegistry
 from domain.ports.vector_store import VectorStore
 from domain.ports.web_search import WebSearchProvider
 from application.answer_service import AnswerService
@@ -45,6 +46,7 @@ class RunExecutionService:
         web_search: WebSearchProvider | None = None,
         cache_port: CachePort | None = None,
         checkpointer: BaseCheckpointSaver | None = None,
+        tool_registry: ToolRegistry | None = None,
     ):
         self.vector_store = vector_store
         self.llm_provider = llm_provider
@@ -52,6 +54,7 @@ class RunExecutionService:
         self.web_search = web_search
         self.cache_port = cache_port
         self.checkpointer = checkpointer or PostgresCheckpointSaver()
+        self.tool_registry = tool_registry
 
     def build_graph(
         self,
@@ -61,13 +64,14 @@ class RunExecutionService:
     ):
         """Assemble the compiled Kriyamaan graph using configured providers and checkpointer."""
         active_llm = llm_provider or self.llm_provider
-        controller = AgentController(llm_provider=active_llm)
+        controller = AgentController(llm_provider=active_llm, tool_registry=self.tool_registry)
         active_web = web_search or self.web_search
         web_provider = active_web if enable_web_search else None
         retrieval_agent = RetrievalAgent(
             vector_store=self.vector_store,
             reranker=self.reranker,
             web_search=web_provider,
+            tool_registry=self.tool_registry,
         )
         evidence_judge = EvidenceJudge(llm_provider=active_llm)
         context_builder = ContextBuilder()
@@ -92,6 +96,7 @@ class RunExecutionService:
         enable_web_search: bool = False,
         llm_provider: LLMProvider | None = None,
         web_search: WebSearchProvider | None = None,
+        user_id: str | None = None,
     ) -> dict[str, Any]:
         session_repo = SessionRepository(db)
         turn_repo = ConversationTurnRepository(db)
@@ -101,7 +106,7 @@ class RunExecutionService:
 
         # 1. Verify session
         session = await session_repo.get_by_id(session_id)
-        if not session:
+        if not session or (user_id and session.user_id and session.user_id != user_id):
             raise ResourceNotFoundError(
                 f"Session '{session_id}' not found.", resource_type="session", resource_id=session_id
             )
@@ -155,6 +160,7 @@ class RunExecutionService:
             budgets=active_budgets.model_dump(mode="json"),
             run_id=run_id,
             status="running",
+            user_id=user_id,
         )
 
         # 4. Assemble Graph Nodes & Graph
@@ -190,6 +196,8 @@ class RunExecutionService:
             "guardrail_reason_code": None,
             "session_documents": session_documents,
             "enable_web_search": enable_web_search,
+            "user_id": user_id,
+            "memory_principal_id": principal_id,
         }
 
         # 6. Execute Graph
@@ -224,6 +232,7 @@ class RunExecutionService:
                 user_query=query,
                 answer=ans_dict,
                 status="completed",
+                user_id=user_id,
             )
 
         # 9. Update Terminal Run Record

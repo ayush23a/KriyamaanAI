@@ -20,6 +20,7 @@ import {
 import { AppNavView, HealthStatus, LocalSessionMeta } from '../../types';
 import { GroupedSessions } from '../../lib/storage';
 import { cn } from '../../lib/utils';
+import { UserButton } from '@clerk/nextjs';
 
 interface SidebarProps {
   currentView: AppNavView;
@@ -348,6 +349,25 @@ export const Sidebar: React.FC<SidebarProps> = ({
               ))}
             </div>
           )}
+        </div>
+
+        {/* User Account & Identity */}
+        <div
+          className={cn(
+            'mt-2.5 pt-2.5 border-t border-[#E7E2DA]/80 flex items-center',
+            isCollapsed ? 'justify-center' : 'justify-between px-1'
+          )}
+        >
+          <UserButton
+            showName={!isCollapsed}
+            appearance={{
+              elements: {
+                userButtonAvatarBox: 'w-7 h-7 rounded-lg border border-stone-200 shadow-2xs',
+                userButtonOuterIdentifier: 'text-xs font-medium text-stone-800 font-sans truncate max-w-[140px]',
+                userButtonPopoverCard: 'border border-stone-200 shadow-lg rounded-xl',
+              },
+            }}
+          />
         </div>
       </div>
     </div>

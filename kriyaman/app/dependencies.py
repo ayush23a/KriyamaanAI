@@ -127,6 +127,15 @@ def get_ingestion_service() -> IngestionService:
     )
 
 
+from adapters.tools.registry import DefaultToolRegistry
+from domain.ports.tools import ToolRegistry
+
+
+@lru_cache
+def get_tool_registry() -> ToolRegistry:
+    return DefaultToolRegistry()
+
+
 def get_run_service() -> RunExecutionService:
     return RunExecutionService(
         vector_store=get_vector_store(),
@@ -134,4 +143,8 @@ def get_run_service() -> RunExecutionService:
         reranker=get_reranker(),
         web_search=get_web_search_provider(),
         cache_port=get_cache_adapter(),
+        tool_registry=get_tool_registry(),
     )
+
+
+from app.auth import get_current_user

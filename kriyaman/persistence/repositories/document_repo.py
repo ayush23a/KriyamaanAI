@@ -16,26 +16,51 @@ class DocumentRepository:
         )
         return result.scalars().first()
 
-    async def get_by_session_and_hash(
-        self, session_id: str, sha256_hash: str
-    ) -> DocumentModel | None:
+    async def get_by_id_and_user(self, document_id: str, user_id: str) -> DocumentModel | None:
         result = await self.session.execute(
+            select(DocumentModel)
+            .where(DocumentModel.id == document_id)
+            .where(DocumentModel.user_id == user_id)
+        )
+        return result.scalars().first()
+
+    async def get_by_session_and_hash(
+        self, session_id: str, sha256_hash: str, user_id: str | None = None
+    ) -> DocumentModel | None:
+        stmt = (
             select(DocumentModel)
             .where(DocumentModel.session_id == session_id)
             .where(DocumentModel.sha256 == sha256_hash)
         )
+        if user_id:
+            stmt = stmt.where(DocumentModel.user_id == user_id)
+        result = await self.session.execute(stmt)
         return result.scalars().first()
 
     async def list_by_session(
-        self, session_id: str, limit: int = 50, offset: int = 0
+        self, session_id: str, limit: int = 50, offset: int = 0, user_id: str | None = None
     ) -> Sequence[DocumentModel]:
-        result = await self.session.execute(
+        stmt = (
             select(DocumentModel)
             .where(DocumentModel.session_id == session_id)
+        )
+        if user_id:
+            stmt = stmt.where(DocumentModel.user_id == user_id)
+        stmt = stmt.order_by(DocumentModel.created_at.desc()).limit(limit).offset(offset)
+        result = await self.session.execute(stmt)
+        return result.scalars().all()
+
+    async def list_by_user(
+        self, user_id: str, limit: int = 50, offset: int = 0
+    ) -> Sequence[DocumentModel]:
+        stmt = (
+            select(DocumentModel)
+            .where(DocumentModel.user_id == user_id)
             .order_by(DocumentModel.created_at.desc())
             .limit(limit)
             .offset(offset)
         )
+        result = await self.session.execute(stmt)
         return result.scalars().all()
 
     async def create(
@@ -47,6 +72,7 @@ class DocumentRepository:
         status: str = "processed",
         metadata: dict[str, Any] | None = None,
         document_id: str | None = None,
+        user_id: str | None = None,
     ) -> DocumentModel:
         kwargs: dict[str, Any] = {
             "session_id": session_id,
@@ -55,6 +81,7 @@ class DocumentRepository:
             "sha256": sha256,
             "status": status,
             "metadata_json": metadata or {},
+            "user_id": user_id,
         }
         if document_id:
             kwargs["id"] = document_id
@@ -65,6 +92,14 @@ class DocumentRepository:
 
     async def delete(self, document_id: str) -> bool:
         doc = await self.get_by_id(document_id)
+        if doc:
+            await self.session.delete(doc)
+            await self.session.flush()
+            return True
+        return False
+
+    async def delete_for_user(self, document_id: str, user_id: str) -> bool:
+        doc = await self.get_by_id_and_user(document_id, user_id)
         if doc:
             await self.session.delete(doc)
             await self.session.flush()

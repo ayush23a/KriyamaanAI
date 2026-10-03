@@ -38,10 +38,34 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+class UserModel(Base):
+    __tablename__ = "users"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
+    auth_provider: Mapped[str] = mapped_column(String(32), default="clerk", nullable=False)
+    auth_subject: Mapped[str] = mapped_column(String(128), unique=True, nullable=False, index=True)
+    email: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    display_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="active", nullable=False)
+
+    sessions: Mapped[list["SessionModel"]] = relationship("SessionModel", back_populates="user")
+    documents: Mapped[list["DocumentModel"]] = relationship("DocumentModel", back_populates="user")
+    memories: Mapped[list["MemoryModel"]] = relationship("MemoryModel", back_populates="user")
+    runs: Mapped[list["RunModel"]] = relationship("RunModel", back_populates="user")
+
+
 class MemoryPrincipalModel(Base):
     __tablename__ = "memory_principals"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
+    user_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True
+    )
     namespace_key: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
     kind: Mapped[str] = mapped_column(String(64), default="anonymous", nullable=False)
     metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
@@ -55,6 +79,9 @@ class SessionModel(Base):
     __tablename__ = "sessions"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
+    user_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True
+    )
     memory_principal_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("memory_principals.id", ondelete="CASCADE"), nullable=False, index=True
     )
@@ -65,16 +92,26 @@ class SessionModel(Base):
         DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
     )
 
+    user: Mapped["UserModel | None"] = relationship("UserModel", back_populates="sessions")
     memory_principal: Mapped["MemoryPrincipalModel"] = relationship("MemoryPrincipalModel", back_populates="sessions")
-    turns: Mapped[list["ConversationTurnModel"]] = relationship("ConversationTurnModel", back_populates="session")
-    documents: Mapped[list["DocumentModel"]] = relationship("DocumentModel", back_populates="session")
-    runs: Mapped[list["RunModel"]] = relationship("RunModel", back_populates="session")
+    turns: Mapped[list["ConversationTurnModel"]] = relationship(
+        "ConversationTurnModel", back_populates="session", cascade="all, delete-orphan", passive_deletes=True
+    )
+    documents: Mapped[list["DocumentModel"]] = relationship(
+        "DocumentModel", back_populates="session", cascade="all, delete-orphan", passive_deletes=True
+    )
+    runs: Mapped[list["RunModel"]] = relationship(
+        "RunModel", back_populates="session", cascade="all, delete-orphan", passive_deletes=True
+    )
 
 
 class ConversationTurnModel(Base):
     __tablename__ = "conversation_turns"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
+    user_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True
+    )
     session_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False, index=True
     )
@@ -94,6 +131,9 @@ class DocumentModel(Base):
     __tablename__ = "documents"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
+    user_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True
+    )
     session_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False, index=True
     )
@@ -107,6 +147,7 @@ class DocumentModel(Base):
         DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
     )
 
+    user: Mapped["UserModel | None"] = relationship("UserModel", back_populates="documents")
     session: Mapped["SessionModel"] = relationship("SessionModel", back_populates="documents")
     chunks: Mapped[list["DocumentChunkModel"]] = relationship(
         "DocumentChunkModel", back_populates="document", cascade="all, delete-orphan"
@@ -143,6 +184,9 @@ class MemoryModel(Base):
     __tablename__ = "memories"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
+    user_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True
+    )
     memory_principal_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("memory_principals.id", ondelete="CASCADE"), nullable=False, index=True
     )
@@ -158,6 +202,7 @@ class MemoryModel(Base):
         DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
     )
 
+    user: Mapped["UserModel | None"] = relationship("UserModel", back_populates="memories")
     memory_principal: Mapped["MemoryPrincipalModel"] = relationship("MemoryPrincipalModel", back_populates="memories")
 
 
@@ -179,6 +224,9 @@ class ToolCallModel(Base):
     __tablename__ = "tool_calls"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
+    user_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True
+    )
     run_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
     tool_name: Mapped[str] = mapped_column(String(128), nullable=False)
     arguments_json: Mapped[dict] = mapped_column(JSON, default=dict)
@@ -192,6 +240,9 @@ class RunModel(Base):
     __tablename__ = "runs"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
+    user_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True
+    )
     session_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False, index=True
     )
@@ -204,6 +255,7 @@ class RunModel(Base):
         DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
     )
 
+    user: Mapped["UserModel | None"] = relationship("UserModel", back_populates="runs")
     session: Mapped["SessionModel"] = relationship("SessionModel", back_populates="runs")
     events: Mapped[list["RunEventModel"]] = relationship("RunEventModel", back_populates="run", cascade="all, delete-orphan")
 
@@ -304,6 +356,9 @@ class ClientCreditModel(Base):
     __tablename__ = "client_credits"
 
     client_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    user_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True
+    )
     key_mode: Mapped[str] = mapped_column(String(32), default="default", nullable=False)
     default_spent_usd: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     byok_spent_usd: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)

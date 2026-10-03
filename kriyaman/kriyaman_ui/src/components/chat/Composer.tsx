@@ -82,9 +82,9 @@ export const Composer: React.FC<ComposerProps> = ({
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file && onUploadFile) {
-      onUploadFile(file);
+    const files = e.target.files;
+    if (files && files.length > 0 && onUploadFile) {
+      Array.from(files).forEach((file) => onUploadFile(file));
     }
     if (fileInputRef.current) {
       fileInputRef.current.value = '';
@@ -109,6 +109,7 @@ export const Composer: React.FC<ComposerProps> = ({
         <input
           ref={fileInputRef}
           type="file"
+          multiple
           className="hidden"
           onChange={handleFileChange}
           accept=".pdf,.docx,.txt,.md,.html"

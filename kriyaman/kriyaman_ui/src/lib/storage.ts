@@ -42,10 +42,15 @@ export const DEFAULT_SETTINGS: UserSettings = {
   },
 };
 
-export function getLocalSessions(): LocalSessionMeta[] {
+function getSessionKey(userId?: string): string {
+  return userId ? `kriyaman_sessions_${userId}` : CONVERSATIONS_KEY;
+}
+
+export function getLocalSessions(userId?: string): LocalSessionMeta[] {
   if (typeof window === 'undefined') return [];
   try {
-    const raw = localStorage.getItem(CONVERSATIONS_KEY);
+    const key = getSessionKey(userId);
+    const raw = localStorage.getItem(key);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
@@ -57,10 +62,11 @@ export function getLocalSessions(): LocalSessionMeta[] {
   }
 }
 
-export function saveLocalSession(meta: LocalSessionMeta): void {
+export function saveLocalSession(meta: LocalSessionMeta, userId?: string): void {
   if (typeof window === 'undefined') return;
   try {
-    const existing = getLocalSessions();
+    const key = getSessionKey(userId);
+    const existing = getLocalSessions(userId);
     const index = existing.findIndex((s) => s.id === meta.id);
     if (index >= 0) {
       existing[index] = {
@@ -75,31 +81,33 @@ export function saveLocalSession(meta: LocalSessionMeta): void {
         updatedAt: meta.updatedAt || new Date().toISOString(),
       });
     }
-    localStorage.setItem(CONVERSATIONS_KEY, JSON.stringify(existing));
+    localStorage.setItem(key, JSON.stringify(existing));
   } catch (err) {
     console.error('Failed to save session to local storage', err);
   }
 }
 
-export function updateLocalSessionTitle(id: string, title: string): void {
+export function updateLocalSessionTitle(id: string, title: string, userId?: string): void {
   if (typeof window === 'undefined') return;
   try {
-    const existing = getLocalSessions();
+    const key = getSessionKey(userId);
+    const existing = getLocalSessions(userId);
     const item = existing.find((s) => s.id === id);
     if (item) {
       item.title = title;
       item.updatedAt = new Date().toISOString();
-      localStorage.setItem(CONVERSATIONS_KEY, JSON.stringify(existing));
+      localStorage.setItem(key, JSON.stringify(existing));
     }
   } catch {}
 }
 
-export function deleteLocalSession(id: string): void {
+export function deleteLocalSession(id: string, userId?: string): void {
   if (typeof window === 'undefined') return;
   try {
-    const existing = getLocalSessions();
+    const key = getSessionKey(userId);
+    const existing = getLocalSessions(userId);
     const filtered = existing.filter((s) => s.id !== id);
-    localStorage.setItem(CONVERSATIONS_KEY, JSON.stringify(filtered));
+    localStorage.setItem(key, JSON.stringify(filtered));
   } catch {}
 }
 
