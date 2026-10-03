@@ -22,10 +22,11 @@ The first release must:
 - return citations, structured execution metadata, clarification requests, or abstention;
 - persist durable application data and graph checkpoints in PostgreSQL;
 - use Redis only as a replaceable, non-authoritative application cache;
-- add full Langfuse instrumentation immediately after the core runtime smoke-test milestone;
-- add repeatable Ragas/offline evaluation runs in the evaluation phase after the core runtime and observability milestones.
+- integrate Clerk authentication and multi-tenant session isolation across sessions, documents, and memories;
+- provide full Langfuse instrumentation with graceful failure degradation;
+- provide repeatable Ragas/offline evaluation runs with golden datasets and metrics.
 
-The first release explicitly does **not** include authentication, authorization/RBAC, multi-service deployment, asynchronous task infrastructure, or deployment configuration changes.
+Non-goals remain: multi-service deployment, external asynchronous message broker queues (Celery/RabbitMQ), and unapproved production cloud deployment changes.
 
 ## 2. Architectural principles
 
@@ -114,6 +115,7 @@ kriyaman/
     api/
       routes.py
       schemas.py
+    auth.py                    # Clerk JWT authentication & user dependency
     config.py
     dependencies.py
   domain/
@@ -153,22 +155,35 @@ kriyaman/
     llm/litellm_gateway.py
     llm/google.py              # optional direct/test adapter
     embeddings/sentence_transformers.py
-    reranking/
-    vectorstores/pgvector.py
+    reranking/baseline.py
+    vectorstores/pgvector.py   # pgvector + tsvector RRF hybrid search
     memory/postgres.py
     cache/redis.py
-    web/
-    tools/
-    observability/langfuse.py
+    web/adk_search.py          # Google ADK + Tavily fallback
+    tools/registry.py          # concrete tool registry & execution
+    observability/langfuse.py  # Langfuse tracing & spans
   persistence/
     db.py
     models.py
     repositories/
+      session_repo.py
+      document_repo.py
+      turn_repo.py
+      memory_repo.py
+      run_repo.py
+      credit_repo.py
+      user_repo.py             # User profile & ownership queries
     migrations/
-  evaluation/                 # added after the core runtime milestone
+      versions/
+        001_initial_schema.py
+        002_langgraph_checkpoints.py
+        003_client_credits.py
+        004_document_chunks_tsv_gin.py # GIN index for hybrid full-text search
+        005_add_users_and_ownership.py # Multi-tenant user ownership
+  evaluation/
     datasets/
-    runner.py
-    metrics.py
+    runner.py                  # Ragas evaluation runner
+    metrics.py                 # Ragas faithfulness, relevancy, context precision/recall
     reports/
   main.py
 kriyaman_ui/                  # Next.js 16 App Router client (React 19, TypeScript, Tailwind CSS)
@@ -237,7 +252,7 @@ class GraphState(TypedDict):
     normalized_query: str
     status: Literal["running", "clarification", "answer", "abstention", "conflicting", "failed"]
     controller_plan: AcquisitionPlan | None
-    plan_history: list[AcquisitionPlan]
+    plan_history: list[PlanHistoryEntry]
     evidence: list[EvidenceItem]
     evidence_assessment: EvidenceAssessment | None
     memory_items: list[MemoryItem]
@@ -250,6 +265,10 @@ class GraphState(TypedDict):
     context_package: ContextPackage | None
     answer: Answer | None
     failure: FailureInfo | None
+    guardrail_rejected: bool
+    guardrail_reason_code: str | None
+    session_documents: list[str] | None
+    enable_web_search: bool
 ```
 
 State invariants:
@@ -332,10 +351,14 @@ The LLM cannot bypass graph edges, invoke an unregistered tool, execute side eff
 
 ### 4.4 Retrieval and iteration policy
 
-- First pass defaults to internal vector/hybrid retrieval when a knowledge base is available.
+- First pass defaults to internal vector/hybrid retrieval when session documents are available.
 - Metadata filters are applied before or during vector search when the plan includes them.
-- Reranking is applied only when requested and within latency budget.
-- Web search is an optional fallback/corroboration source, never an implicit mandatory dependency.
+- Reranking is applied only when requested and within latency budget, using two-stage candidate oversampling.
+- Native hybrid search fuses pgvector dense cosine similarity with PostgreSQL `tsvector`/`tsquery` full-text search using Reciprocal Rank Fusion (RRF, $K=60$) accelerated by a GIN index on `document_chunks.content_tsv`.
+- Memory of past failures: Each retrieval iteration records a `PlanHistoryEntry` pairing the executed plan with the Evidence Judge's verdict, reason code, and missing aspects.
+- Refinement strategy & filter relaxation: If a document-name filter or specific query yields insufficient content, subsequent iterations relax the filter to search across the whole session.
+- Web search escalation: When `enable_web_search=True`, if internal document search yields `insufficient` evidence or missing aspects, the controller automatically escalates to `web_search`.
+- Deictic resolution for web queries: When escalating, deictic references (*"this company"*, *"the system"*, *"who are the founders"*) are resolved to grounded entity names identified by the Evidence Judge's missing aspects (e.g. *"founders of Achaia Labs"*). If no session documents exist and web search is enabled, the controller routes to `web_search` directly on the first turn.
 - `no_acquisition_required` is valid only when the controller can explain the policy basis in structured fields; it still flows through the Evidence/Sufficiency Judge before any generation.
 - Each iteration must have a distinct purpose and record a `reason_code`.
 - Duplicate evidence is merged by stable content/source hash.
@@ -528,6 +551,22 @@ To support deployment from local development to hosted staging/production enviro
    - The runtime exposes `POST /api/v1/health/test-keys` allowing immediate verification of candidate API keys.
    - Tests execute live lightweight pings against Google Gemini, Groq, and Tavily, measuring round-trip latency in milliseconds and reporting structured validation status (`valid: bool`, `message: str`, `latency_ms: int`) before keys are activated.
 
+### 6.5 User Authentication & Multi-Tenant Session Isolation
+
+To guarantee data boundary protection across users in hosted environments, Kriyamaan integrates Clerk authentication:
+
+1. **Token Verification**:
+   - FastAPI endpoints protect stateful resources via the `get_current_user` dependency in `app/auth.py`.
+   - Bearer JWT tokens from the `Authorization: Bearer <token>` header are validated against Clerk's JSON Web Key Set (JWKS) or development secret key.
+   - Authenticated user records are lazily synced and stored in the PostgreSQL `users` table via `UserRepository`.
+2. **Data Ownership & Tenant Scoping**:
+   - Sessions, uploaded documents, and explicit memories enforce strict `user_id` ownership (Migration `005_add_users_and_ownership.py`).
+   - Cross-tenant data access is blocked at the repository and database foreign-key layer: queries for sessions, documents, and memories filter strictly by the calling user's UUID.
+   - Anonymous execution remains supported for local testing, fallback, or non-authenticated local configurations via anonymous principal mappings.
+3. **Frontend Client Integration**:
+   - The Next.js 16 frontend (`kriyaman_ui`) uses `@clerk/nextjs` with dedicated `/sign-in` and `/sign-up` routes.
+   - `src/middleware.ts` guards application routes, passing the authenticated session token to backend API calls.
+
 ## 7. Context construction
 
 `ContextBuilder` is deterministic application code:
@@ -605,12 +644,13 @@ Use SQLAlchemy models, Alembic migrations, PostgreSQL, and pgvector. The graph c
 
 | Table | Important columns | Purpose |
 |---|---|---|
-| `memory_principals` | `id`, `namespace_key`, `kind`, `created_at`, `metadata_json` | Anonymous logical memory namespace that can later map to an authenticated user |
-| `sessions` | `id`, `memory_principal_id`, `created_at`, `updated_at`, `title`, `metadata_json` | Anonymous logical conversation/session |
+| `users` | `id`, `clerk_id`, `email`, `first_name`, `last_name`, `image_url`, timestamps | Authenticated user profiles synced from Clerk (Migration 005) |
+| `memory_principals` | `id`, `namespace_key`, `kind`, `created_at`, `metadata_json` | Logical memory namespace mapping to user or anonymous principal |
+| `sessions` | `id`, `user_id`, `memory_principal_id`, `title`, `metadata_json`, timestamps | User-owned or anonymous conversation session |
 | `conversation_turns` | `id`, `session_id`, `run_id`, `user_query`, `answer_json`, `status`, timestamps | Durable user/assistant turns |
-| `documents` | `id`, `session_id`, `name`, `mime_type`, `sha256`, `status`, `metadata_json`, timestamps | Uploaded/ingested source |
-| `document_chunks` | `id`, `document_id`, `chunk_index`, `content`, `content_hash`, `embedding vector`, `metadata_json` | Searchable chunks |
-| `memories` | `id`, `memory_principal_id`, `kind`, `content`, `embedding vector`, `status`, `source_turn_id`, `explicit`, timestamps | Explicit long-term memory scoped to a principal; session memory remains turns |
+| `documents` | `id`, `session_id`, `user_id`, `name`, `mime_type`, `sha256`, `status`, `metadata_json`, timestamps | Uploaded/ingested source scoped to session and user |
+| `document_chunks` | `id`, `document_id`, `chunk_index`, `content`, `content_hash`, `embedding vector`, `content_tsv`, `metadata_json` | Searchable chunks with pgvector embeddings and GIN-indexed TSVECTOR (Migration 004) |
+| `memories` | `id`, `user_id`, `memory_principal_id`, `kind`, `content`, `embedding vector`, `status`, `source_turn_id`, `explicit`, timestamps | Explicit long-term memory scoped to user principal |
 | `retrieval_records` | `id`, `run_id`, `iteration`, `method`, `query`, `filters_json`, `results_json`, latency_ms | Retrieval audit and statistics |
 | `tool_calls` | `id`, `run_id`, `tool_name`, `arguments_json`, `result_json`, `status`, latency_ms | Tool audit |
 | `runs` | `id`, `session_id`, `status`, `budgets_json`, `usage_json`, `final_decision`, timestamps | Application run summary |
@@ -668,8 +708,10 @@ FastAPI is the authoritative application boundary. Pydantic request/response mod
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/api/v1/health` | Liveness and dependency summary without secrets |
-| `POST` | `/api/v1/sessions` | Create an anonymous session |
+| `POST` | `/api/v1/sessions` | Create a user-owned or anonymous session |
+| `GET` | `/api/v1/sessions` | List sessions belonging to the current user |
 | `GET` | `/api/v1/sessions/{session_id}` | Session summary and recent turns |
+| `DELETE` | `/api/v1/sessions/{session_id}` | Delete session and associated conversation history |
 | `POST` | `/api/v1/sessions/{session_id}/runs` | Start a query run |
 | `GET` | `/api/v1/runs/{run_id}` | Run status, answer, citations, budgets, and metrics |
 | `GET` | `/api/v1/runs/{run_id}/events` | Structured event stream or replay |
@@ -677,13 +719,15 @@ FastAPI is the authoritative application boundary. Pydantic request/response mod
 | `GET` | `/api/v1/sessions/{session_id}/documents` | List ingestion status |
 | `DELETE` | `/api/v1/documents/{document_id}` | Delete document, chunks, and associated search data |
 | `POST` | `/api/v1/sessions/{session_id}/memories` | Explicitly save a long-term memory |
+| `GET` | `/api/v1/sessions/{session_id}/memories` | List memories for session principal |
 | `DELETE` | `/api/v1/memories/{memory_id}` | Delete an explicit memory |
 | `GET` | `/api/v1/client/credits` | Client cumulative usage, remaining free trial credit, and cap status |
 | `POST` | `/api/v1/health/test-keys` | Live latency and validity verification for Gemini, Groq, and Tavily API keys |
 
 `POST /runs` request must include `query` and may include `budgets`, `response_mode`, and `enable_web_search`. It returns `run_id`, initial status, and a polling/event URL. Streaming is supported in the event model so client applications do not depend on internal Python objects.
 
-Request headers supporting client identification and BYOK execution:
+Request headers supporting client identification, authentication, and BYOK execution:
+- `Authorization`: `Bearer <token>` containing the Clerk JWT session token.
 - `X-Client-Id`: Persistent UUID identifying the client session/browser profile for credit accounting.
 - `X-Key-Mode`: Operation mode (`"default"` to use platform server keys, or `"byok"` to use client-supplied keys).
 - `X-Gemini-Api-Key`: Optional BYOK Google Gemini API key.
@@ -1134,7 +1178,7 @@ Required:
 - establish Langfuse and evaluation extension points from the beginning, but implement full Langfuse instrumentation after core smoke tests and Ragas/custom evaluation in the following evaluation phase;
 - keep observability failures non-blocking;
 - expose structured execution data, never hidden chain-of-thought;
-- do not add prohibited infrastructure or authentication;
+- do not add unapproved external infrastructure;
 - do not commit, push, merge, or create pull requests.
 
 The rebuild is complete only when:
@@ -1175,7 +1219,7 @@ passing unit suite alone is insufficient.
 
 - [x] The application imports and compiles with the existing repository venv (`compileall -q .` clean).
 - [x] Clean-database and upgrade-path Alembic migrations complete
-  successfully, including LangGraph checkpoints (`002`) and client credits (`003`). (Verified via `test_migration_schema_covers_all_registered_models`).
+  successfully, including LangGraph checkpoints (`002`), client credits (`003`), full-text TSVECTOR GIN indexing (`004`), and Clerk user ownership (`005`). (Verified via `test_migration_schema_covers_all_registered_models`).
 - [x] Sessions, turns, documents, chunks, memories, runs, events, artifacts,
   usage, and credit records persist with foreign keys, indexes, and safe
   transaction boundaries.
